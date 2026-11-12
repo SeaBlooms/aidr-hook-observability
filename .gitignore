@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Captured hook data is sensitive (prompts, tool output) and never belongs in git.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.jsonl
+*.jsonl.*
+*.log
+*.log.*
+
+# Made-up fixture data is safe to commit.
+!tests/fixtures/
+!tests/fixtures/**
