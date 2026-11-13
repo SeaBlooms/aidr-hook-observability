@@ -149,7 +149,13 @@ def _finish(item: dict) -> dict:
     return item
 
 
-def graph(conn: sqlite3.Connection, since: int, max_nodes: int = DEFAULT_MAX_NODES, focus: str | None = None) -> dict:
+def graph(
+    conn: sqlite3.Connection,
+    since: int,
+    max_nodes: int = DEFAULT_MAX_NODES,
+    focus: str | None = None,
+    until: int | None = None,
+) -> dict:
     """The entity graph for actions since `since` (ms), capped at `max_nodes`.
 
     With `focus` (a node id such as "dest:github.com"), only the entities and links of actions
@@ -162,7 +168,7 @@ def graph(conn: sqlite3.Connection, since: int, max_nodes: int = DEFAULT_MAX_NOD
     verdict and then by action count, so blocked or flagged entities survive before busy but
     benign ones. Edges whose endpoints were dropped are dropped too.
     """
-    actions = load_actions(conn, since)
+    actions = load_actions(conn, since, until)
     full = build(actions)
     focus_info = None
     if focus:

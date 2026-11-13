@@ -1,0 +1,8 @@
+[
+  {
+    "id": "remote-settings-missing",
+    "pattern": "read_json open/read <path>: FileNotFoundError",
+    "contains": "remote-settings.json",
+    "explanation": "the Noma hook checks for optional server-pushed settings"
+  }
+]

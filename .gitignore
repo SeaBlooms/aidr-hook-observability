@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+.smoke/
 
 # Captured hook data is sensitive (prompts, tool output) and never belongs in git.
 *.db
