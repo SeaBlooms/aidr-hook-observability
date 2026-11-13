@@ -11,6 +11,16 @@ This is an independent project. It is not affiliated with, endorsed by or suppor
 Noma Security. "Noma" refers only to the guardrails plugins this tool observes
 ([Noma-Security/noma-marketplace](https://github.com/Noma-Security/noma-marketplace)).
 
+## What it looks like
+
+These are fixture runs. Commands, hosts, paths, and session ids are covered.
+
+<img alt="Overview: attention cards, recent actions, and a chart by action type" src="docs/screenshots/overview.png" width="900">
+
+<img alt="Activity: one row per agent action, with verdicts and tags" src="docs/screenshots/activity.png" width="900">
+
+<img alt="Graph: agents, projects, sessions, tools, and destinations" src="docs/screenshots/graph.png" width="900">
+
 ## Status
 
 - Works with Claude Code and Cursor. The capture tap sits in front of the installed Noma hooks
