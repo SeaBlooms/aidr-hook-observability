@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 SEVERITY = {"block": 6, "ask": 5, "mask": 4, "context": 3, "other": 2, "dry_run": 1, "allow": 0}
+FLAGGED = ("block", "ask", "mask", "context")
+
+
+def _between(column: str, since: int, until: int | None) -> tuple[str, tuple]:
+    if until is None:
+        return f"{column} >= ?", (since,)
+    return f"{column} >= ? AND {column} <= ?", (since, until)
+
+
 PROMPT_EVENTS = ("UserPromptSubmit", "beforeSubmitPrompt")
 RESPONSE_EVENTS = ("Stop", "afterAgentResponse")
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "StrReplace", "NotebookEdit", "EditNotebook")
@@ -49,6 +58,7 @@ class Action:
     permission_mode: str | None = None
     text: str | None = None
     tokens: dict | None = None
+    latency_ms: int | None = None
 
 
 def _as_dict(value) -> dict:
@@ -92,12 +102,16 @@ def _tool_name(agent: str, event: str | None, stdin: dict, fallback: str | None)
     return name
 
 
-def _load_captures(conn: sqlite3.Connection, since: int) -> list[dict]:
-    rows = conn.execute(
+def _load_captures(conn: sqlite3.Connection, since: int, until: int | None = None) -> list[dict]:
+    sql = (
         "SELECT id, ts, ts_ms, agent, event, tool_name, session_id, verdict, reason, stdin_json, latency_ms"
-        " FROM captures WHERE ts_ms >= ? ORDER BY ts_ms, id",
-        (since,),
-    ).fetchall()
+        " FROM captures WHERE ts_ms >= ?"
+    )
+    args: list = [since]
+    if until is not None:
+        sql += " AND ts_ms <= ?"
+        args.append(until)
+    rows = conn.execute(sql + " ORDER BY ts_ms, id", args).fetchall()
     out = []
     for r in rows:
         rec = dict(r)
@@ -134,13 +148,16 @@ def _merge(action: Action, rec: dict) -> None:
     action.project = action.project or _project(stdin)
     action.model = action.model or stdin.get("model_id") or stdin.get("model")
     action.permission_mode = action.permission_mode or stdin.get("permission_mode")
+    lat = rec.get("latency_ms")
+    if isinstance(lat, (int, float)) and not isinstance(lat, bool):
+        action.latency_ms = max(action.latency_ms or 0, int(lat))
 
 
-def load_actions(conn: sqlite3.Connection, since: int = 0) -> list[Action]:
+def load_actions(conn: sqlite3.Connection, since: int = 0, until: int | None = None) -> list[Action]:
     actions: list[Action] = []
     by_tool_use: dict[tuple, Action] = {}
     pending_edits = []
-    for rec in _load_captures(conn, since):
+    for rec in _load_captures(conn, since, until):
         stdin = rec["stdin"]
         agent, event = rec["agent"] or "?", rec["event"]
         session = rec["session_id"] or stdin.get("session_id") or stdin.get("conversation_id")
@@ -279,9 +296,9 @@ def _summary(a: Action) -> str:
     return ""
 
 
-def destinations(conn: sqlite3.Connection, since: int) -> dict:
+def destinations(conn: sqlite3.Connection, since: int, until: int | None = None) -> dict:
     groups: dict[tuple, dict] = {}
-    for a in load_actions(conn, since):
+    for a in load_actions(conn, since, until):
         if a.kind != "tool":
             continue
         for d in destinations_of(a):
@@ -353,9 +370,9 @@ def _access(a: Action) -> str:
     return "tool"
 
 
-def sensitive(conn: sqlite3.Connection, since: int) -> dict:
+def sensitive(conn: sqlite3.Connection, since: int, until: int | None = None) -> dict:
     hits, unsandboxed, modes = [], [], {}
-    for a in load_actions(conn, since):
+    for a in load_actions(conn, since, until):
         if a.permission_mode:
             modes[(a.agent, a.permission_mode)] = modes.get((a.agent, a.permission_mode), 0) + 1
         if a.kind != "tool":
@@ -398,9 +415,9 @@ def _session_key(a: Action) -> str:
     return a.agent + "|" + (a.session or "?")
 
 
-def sessions(conn: sqlite3.Connection, since: int) -> dict:
+def sessions(conn: sqlite3.Connection, since: int, until: int | None = None) -> dict:
     groups: dict[str, dict] = {}
-    for a in load_actions(conn, since):
+    for a in load_actions(conn, since, until):
         key = _session_key(a)
         g = groups.setdefault(
             key,
@@ -495,8 +512,8 @@ def _pct(values: list[float], p: float) -> float | None:
     return values[min(len(values) - 1, int(round(p * (len(values) - 1))))]
 
 
-def usage(conn: sqlite3.Connection, since: int) -> dict:
-    actions = load_actions(conn, since)
+def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dict:
+    actions = load_actions(conn, since, until)
     by_model: dict[str, dict] = {}
     token_series: dict[str, dict] = {}
     redacted_responses = 0
@@ -544,8 +561,9 @@ def usage(conn: sqlite3.Connection, since: int) -> dict:
     tool_perf.sort(key=lambda r: -r["total"])
 
     hook_lat: dict[tuple, list] = {}
+    lat_sql, lat_args = _between("ts_ms", since, until)
     for r in conn.execute(
-        "SELECT agent, event, latency_ms FROM captures WHERE ts_ms >= ? AND latency_ms IS NOT NULL", (since,)
+        "SELECT agent, event, latency_ms FROM captures WHERE " + lat_sql + " AND latency_ms IS NOT NULL", lat_args
     ):
         hook_lat.setdefault((r["agent"], r["event"]), []).append(r["latency_ms"])
     hook_perf = [
@@ -595,4 +613,273 @@ def usage(conn: sqlite3.Connection, since: int) -> dict:
         "tool_perf": tool_perf,
         "hook_perf": hook_perf,
         "projects": project_rows,
+    }
+
+
+# --- actions, search, attention --------------------------------------------------------------------
+
+READ_TOOLS = ("Read", "ReadFile")
+SHELL_TOOLS = ("Shell", "Bash")
+
+
+def action_type(a: Action) -> str:
+    """One of Prompt, Response, Shell, Read file, File edit, MCP call or Tool."""
+    if a.kind == "prompt":
+        return "Prompt"
+    if a.kind == "response":
+        return "Response"
+    if a.mcp_server:
+        return "MCP call"
+    tool = a.tool or ""
+    if a.command or tool in SHELL_TOOLS:
+        return "Shell"
+    if tool in EDIT_TOOLS or "afterFileEdit" in a.events:
+        return "File edit"
+    if tool in READ_TOOLS or "beforeReadFile" in a.events:
+        return "Read file"
+    return "Tool"
+
+
+def _flagged(a: Action) -> bool:
+    return a.verdict in FLAGGED
+
+
+def action_record(a: Action) -> dict:
+    """JSON shape for one action. Summary is the command, path, URL or prompt text."""
+    dests = destinations_of(a) if a.kind == "tool" else []
+    labels = sensitive_hits(a) if a.kind == "tool" else []
+    summary = _summary(a) if a.kind == "tool" else (a.text or "")
+    return {
+        "id": a.capture_ids[0] if a.capture_ids else None,
+        "capture_ids": list(a.capture_ids),
+        "ts": a.ts,
+        "ts_ms": a.ts_ms,
+        "agent": a.agent,
+        "session": a.session,
+        "session_key": _session_key(a),
+        "turn": a.turn,
+        "tool": a.tool,
+        "kind": a.kind,
+        "action_type": action_type(a),
+        "events": list(a.events),
+        "verdict": a.verdict,
+        "reason": a.reason,
+        "summary": summary[:4000],
+        "file_path": a.file_path,
+        "mcp_server": a.mcp_server,
+        "sandbox": a.sandbox,
+        "duration_ms": a.duration_ms,
+        "latency_ms": a.latency_ms,
+        "project": a.project,
+        "model": a.model,
+        "permission_mode": a.permission_mode,
+        "sensitive": labels,
+        "destinations": [d["target"] for d in dests],
+        "destination_classes": sorted({d["class"] for d in dests}),
+        "unsandboxed": bool(a.agent == "cursor" and a.command and a.sandbox is False),
+        "bypass": a.permission_mode == "bypassPermissions",
+    }
+
+
+def _query_get(q: dict, key: str) -> str:
+    return (q.get(key) or [""])[0]
+
+
+def list_actions(conn: sqlite3.Connection, since: int, until: int | None, q: dict) -> dict:
+    """Paged actions with filters. Newest first. Facets cover the whole window, before filters."""
+    records = [action_record(a) for a in load_actions(conn, since, until)]
+    facets = {
+        key: sorted({r[key] for r in records if r.get(key)}) for key in ("agent", "action_type", "tool", "verdict")
+    }
+    text = _query_get(q, "q").lower()
+    tag = _query_get(q, "tag")
+    want = {
+        "agent": _query_get(q, "agent"),
+        "action_type": _query_get(q, "type") or _query_get(q, "action_type"),
+        "tool": _query_get(q, "tool"),
+        "verdict": _query_get(q, "verdict"),
+        "session_key": _query_get(q, "session"),
+    }
+
+    def keep(row: dict) -> bool:
+        for key, value in want.items():
+            if value and (row.get(key) or "") != value:
+                return False
+        if tag == "flagged" and row["verdict"] not in FLAGGED:
+            return False
+        if tag == "sensitive" and not row["sensitive"]:
+            return False
+        if tag == "destination" and not row["destinations"]:
+            return False
+        if tag == "unsandboxed" and not (row["unsandboxed"] or row["bypass"]):
+            return False
+        if text:
+            blob = " ".join(
+                [
+                    row.get("summary") or "",
+                    row.get("tool") or "",
+                    row.get("session") or "",
+                    row.get("agent") or "",
+                    row.get("file_path") or "",
+                    row.get("mcp_server") or "",
+                    " ".join(row["destinations"]),
+                ]
+            ).lower()
+            if text not in blob:
+                return False
+        return True
+
+    filtered = [row for row in records if keep(row)]
+    filtered.reverse()
+    try:
+        limit = min(max(int(_query_get(q, "limit") or 80), 1), 500)
+        offset = max(int(_query_get(q, "offset") or 0), 0)
+    except ValueError:
+        limit, offset = 80, 0
+    return {
+        "total": len(filtered),
+        "offset": offset,
+        "limit": limit,
+        "items": filtered[offset : offset + limit],
+        "facets": facets,
+    }
+
+
+def _add_hit(groups: dict, seen: dict, kind: str, ident: str, label: str, detail: str) -> None:
+    if not ident or ident in seen[kind] or len(groups[kind]) >= 12:
+        return
+    seen[kind].add(ident)
+    groups[kind].append({"id": ident, "label": label, "detail": detail})
+
+
+def search(conn: sqlite3.Connection, since: int, until: int | None, query: str, limit: int = 50) -> dict:
+    """Sessions, hosts, paths, tools, MCP servers and commands matching `query`. Capped."""
+    query = (query or "").strip()
+    if len(query) < 2:
+        return {"q": query, "groups": []}
+    needle = query.lower()
+    groups = {k: [] for k in ("session", "action", "destination", "file", "tool", "mcp")}
+    seen = {k: set() for k in groups}
+    for action in reversed(load_actions(conn, since, until)):
+        if action.session and needle in (action.session or "").lower():
+            _add_hit(groups, seen, "session", _session_key(action), action.session, action.agent)
+        if action.tool and needle in action.tool.lower():
+            _add_hit(groups, seen, "tool", action.tool, action.tool, action.agent)
+        if action.file_path and needle in action.file_path.lower():
+            _add_hit(groups, seen, "file", action.file_path, action.file_path, action.tool or "file")
+        if action.kind == "tool":
+            for dest in destinations_of(action):
+                if needle not in dest["target"].lower():
+                    continue
+                if dest["kind"] == "mcp":
+                    _add_hit(groups, seen, "mcp", "mcp:" + dest["target"], dest["target"], "MCP server")
+                else:
+                    _add_hit(groups, seen, "destination", "dest:" + dest["target"], dest["target"], dest["class"])
+        elif action.mcp_server and needle in action.mcp_server.lower():
+            _add_hit(groups, seen, "mcp", "mcp:" + action.mcp_server, action.mcp_server, "MCP server")
+        summary = action.command or action.url or action.file_path or action.text or ""
+        if summary and needle in summary.lower() and action.capture_ids:
+            label = (action.tool or action_type(action)) + " · " + summary[:120]
+            _add_hit(groups, seen, "action", action.capture_ids[0], label, action.agent)
+    out = [{"type": key, "items": groups[key]} for key in groups if groups[key]]
+    left = max(1, min(limit, 50))
+    capped = []
+    for group in out:
+        items = group["items"][:left]
+        if not items:
+            continue
+        capped.append({"type": group["type"], "items": items})
+        left -= len(items)
+        if left <= 0:
+            break
+    return {"q": query, "groups": capped}
+
+
+_BUCKETS = (60_000, 300_000, 900_000, 3_600_000, 21_600_000, 86_400_000, 7 * 86_400_000)
+
+
+def _action_series(actions: list[Action], since: int, until: int | None, now: int) -> tuple[list[dict], int]:
+    """Buckets that cover every action in the window, including ones dated after the clock."""
+    if not actions:
+        return [], _bucket_ms(since or now, max(now, since or now))
+    first = min(action.ts_ms for action in actions)
+    last = max(action.ts_ms for action in actions)
+    since_eff = since or first
+    end = max(until if until is not None else now, last)
+    bucket = _bucket_ms(since_eff, end)
+    start = since_eff - since_eff % bucket
+    while end - start > bucket * 80:
+        larger = next((size for size in _BUCKETS if size > bucket), 0)
+        bucket = larger or bucket * 2
+        start = since_eff - since_eff % bucket
+    counts: dict[int, dict[str, int]] = {}
+    for action in actions:
+        slot = action.ts_ms - action.ts_ms % bucket
+        bucket_counts = counts.setdefault(slot, {})
+        kind = action_type(action)
+        bucket_counts[kind] = bucket_counts.get(kind, 0) + 1
+    series = [{"t": slot, "counts": counts.get(slot, {})} for slot in range(start, end + bucket, bucket)]
+    return series, bucket
+
+
+def _bucket_ms(since: int, now: int) -> int:
+    span = max(now - since, 60_000)
+    for size in _BUCKETS:
+        if span / size <= 72:
+            return size
+    return _BUCKETS[-1]
+
+
+def attention(conn: sqlite3.Connection, since: int, until: int | None, now: int, visit_ms: int = 0) -> dict:
+    """What a reviewer should look at first, plus the latest actions and a chart by action type."""
+    actions = load_actions(conn, since, until)
+    history = actions if since == 0 and until is None else load_actions(conn, 0)
+    first: dict[tuple, tuple] = {}
+    for action in history:
+        if action.kind != "tool":
+            continue
+        for dest in destinations_of(action):
+            key = (dest["kind"], dest["target"])
+            prev = first.get(key)
+            if prev is None or action.ts_ms < prev[0]:
+                first[key] = (action.ts_ms, dest["class"])
+    classes = {"public-ip": 0, "domain": 0, "private-ip": 0, "loopback": 0, "mcp": 0}
+    for ts, cls in first.values():
+        if ts < since or (until is not None and ts > until):
+            continue
+        classes[cls] = classes.get(cls, 0) + 1
+    flagged = sensitive = unsandboxed = bypass = 0
+    for action in actions:
+        if _flagged(action):
+            flagged += 1
+        if action.kind == "tool" and sensitive_hits(action):
+            sensitive += 1
+        if action.agent == "cursor" and action.command and action.sandbox is False:
+            unsandboxed += 1
+        if action.permission_mode == "bypassPermissions":
+            bypass += 1
+    sensitive_since_visit = 0
+    if visit_ms:
+        for action in history:
+            if action.ts_ms >= visit_ms and action.kind == "tool" and sensitive_hits(action):
+                sensitive_since_visit += 1
+    feed = [action_record(action) for action in reversed(actions[-20:])]
+    series, bucket = _action_series(actions, since, until, now)
+    return {
+        "flagged": flagged,
+        "sensitive": sensitive,
+        "sensitive_since_visit": sensitive_since_visit,
+        "unsandboxed": unsandboxed,
+        "bypass": bypass,
+        "destinations": {
+            "public_ip": classes.get("public-ip", 0),
+            "domain": classes.get("domain", 0),
+            "private_ip": classes.get("private-ip", 0),
+            "loopback": classes.get("loopback", 0),
+            "mcp": classes.get("mcp", 0),
+            "in_window": since > 0,
+        },
+        "feed": feed,
+        "series": series if actions else [],
+        "bucket_ms": bucket,
     }

@@ -11,12 +11,23 @@ This is an independent project. It is not affiliated with, endorsed by or suppor
 Noma Security. "Noma" refers only to the guardrails plugins this tool observes
 ([Noma-Security/noma-marketplace](https://github.com/Noma-Security/noma-marketplace)).
 
+## What it looks like
+
+These are fixture runs. Commands, hosts, paths, and session ids are covered.
+
+<img alt="Overview: attention cards, recent actions, and a chart by action type" src="docs/screenshots/overview.png" width="900">
+
+<img alt="Activity: one row per agent action, with verdicts and tags" src="docs/screenshots/activity.png" width="900">
+
+<img alt="Graph: agents, projects, sessions, tools, and destinations" src="docs/screenshots/graph.png" width="900">
+
 ## Status
 
 - Works with Claude Code and Cursor. The capture tap sits in front of the installed Noma hooks
   and records each event locally; with `NOMA_DRYRUN=1` nothing is sent to Noma.
-- Ten dashboard tabs: overview, verdicts, event explorer, errors & health, MCP inventory,
-  destinations, sessions, sensitive access, usage & performance, and the entity graph.
+- Sidebar views: overview, activity, sessions, graph, verdicts, sensitive access, destinations,
+  hook health, MCP inventory, and usage. Activity is one row per agent action; the hook events
+  behind it expand on the row.
 - Destinations are hosts and MCP servers parsed from what the agent asked to do (URLs, shell
   commands, MCP names). The hooks do not see network traffic or DNS, so there are no resolved IPs.
 - Token counts on Cursor responses are kept; string secrets under similar key names are still
@@ -34,8 +45,12 @@ Noma Security. "Noma" refers only to the guardrails plugins this tool observes
   front of the Noma hook. It runs the hook unchanged as a child process, relays its stdout,
   stderr and exit code, then appends one redacted record to `~/.aidr-obs/capture.jsonl`.
 - **Store and UI.** `aidr-obs ingest` loads both into `~/.aidr-obs/aidr.db` (SQLite,
-  incremental, rotation-safe). `aidr-obs serve` shows an overview, verdicts, an event explorer,
-  errors and health, and the MCP inventory.
+  incremental, rotation-safe). `aidr-obs serve` is a loopback dashboard: an attention overview,
+  one row per agent action, sessions, verdicts, destinations, sensitive access, hook health,
+  MCP inventory, usage, and the entity graph. Live mode watches the log and capture files and
+  pushes new rows over `/api/stream`; paused is the default. Known log noise (the optional
+  `remote-settings.json` miss, and anything you add in `~/.aidr-obs/known_noise.json`) stays out
+  of the health status.
 - **Insights from captures** (`src/aidr_obs/insights.py`). Hook events are grouped into agent
   actions by `tool_use_id`; one Cursor shell command fires preToolUse, beforeShellExecution and
   postToolUse. The dashboard derives four more tabs from those actions:
@@ -59,30 +74,37 @@ Noma Security. "Noma" refers only to the guardrails plugins this tool observes
   - *Focus* (`/api/graph?focus=<node id>`, e.g. `dest:github.com`, `session:<agent>|<id>`,
     `sensitive:env file`): only the actions that involve that node, so focusing on a host shows the
     sessions and tools that led to it rather than everything that shares a tool. Counts stay global;
-    `in_focus` says how many involve the focus. The URL `#graph?focus=<id>` links straight to it, and
-    the Destinations, Sessions, Sensitive access tabs and the session timeline have Graph links.
+    `in_focus` says how many involve the focus. The URL `#/graph?focus=<id>` links straight to it, and
+    Destinations, Sessions, Sensitive access and the session page link to the graph.
   - *Expand*: double-click a node, or use Expand in the side panel, to add every entity its
     actions touch. Expansions survive auto-refresh until the focus changes.
   - *Filters*: node-type chips and a verdict filter (all, flagged, blocked). The verdict filter keeps
     whole paths, since every link an action creates carries that action's verdict.
 
-## Dashboard tabs
+## Dashboard
 
-| Tab | Shows |
+The sidebar is grouped: Review (Overview, Activity, Sessions, Graph), Risk (Verdicts, Sensitive
+access, Destinations), Operations (Hook health, MCP inventory, Usage). Under 1100px it collapses
+to icons; under 700px it becomes a menu.
+
+| View | Shows |
 | --- | --- |
-| Overview | hook runs per event over time, outcomes, verdicts, agents, hook latency (p50/p95/max) |
-| Verdicts | recent decisions that did something (block, ask, mask, context, ...) and verdicts per tool |
-| Event explorer | every run and capture, filtered by agent, event, tool, verdict or outcome and searchable, with a detail drawer (payload, hook stdout, log lines) |
-| Errors & health | error signatures grouped across runs, tap errors, and health: key source, installed config, endpoint, sender, outcome |
-| MCP inventory | MCP servers the hooks discovered, and each inventory snapshot |
-| Destinations | hosts and MCP servers the agent asked to reach |
-| Sessions | per-session counts and a prompt → tools → response timeline |
-| Sensitive access | credential and key files touched, unsandboxed Cursor shell commands, permission modes |
-| Usage & performance | Cursor tokens per model, tool run time, hook latency, activity per project |
+| Overview | what needs a look (flagged, sensitive, destinations, unsandboxed, hook health), the latest actions, and a chart by action type |
+| Activity | one row per agent action (command, path, prompt). Expand a row for the hook events behind it, or switch to raw events. Filters and a detail drawer (payload, hook stdout, log lines) |
+| Sessions | per-session counts; open one for the prompt → tools → response timeline |
 | Graph | the entity graph described above |
+| Verdicts | decisions that did something (block, ask, mask, context) and verdicts per tool |
+| Sensitive access | credential and key files touched, unsandboxed Cursor shell commands, permission modes |
+| Destinations | hosts and MCP servers the agent asked to reach |
+| Hook health | failures, timeouts, a setup checklist, and the noise list |
+| MCP inventory | whether each source has servers (`n / m`), the servers the agent actually called, and identical snapshots collapsed to "unchanged since" |
+| Usage | Cursor tokens per model, optional per-model prices you type in (off by default, kept in this browser), tool run time, hook latency, activity per project |
 
-The range selector (1 hour to all time) applies to every tab. Refresh ingests new log lines and
-captures; auto-refresh does that every 10 seconds.
+The time range (1 hour, 24 hours, 7 days, 30 days, all time, since your last visit, or a custom
+from/to) is in the URL, `#/<view>?range=24h`, so a view survives reload and the Back button.
+Refresh ingests new log lines and captures. Live does that when the files change. Search (`/` or
+Ctrl/⌘ K) jumps to a session, action, host, file or tool. In dry-run, verdict pills that only say
+`dry_run` are hidden: the banner says decisions were recorded, not enforced.
 
 ## Setup
 
@@ -173,29 +195,38 @@ be lost.
 ## HTTP API
 
 The UI is a single static page over a JSON API on the same loopback port. Every `GET` takes
-`since=<epoch ms>` (0 for all time).
+`since=<epoch ms>` (0 for all time) and an optional `until=<epoch ms>`.
 
 | Endpoint | Returns |
 | --- | --- |
-| `/api/summary` | overview counts and time series |
+| `/api/overview` | attention counts, the latest actions, and the action-type chart |
+| `/api/actions` | one row per agent action (`offset`, filters, `q`) |
+| `/api/search` | sessions, actions, hosts, files, tools and MCP servers for a query |
+| `/api/summary` | hook-run counts and a time series |
 | `/api/verdicts` | verdict breakdowns |
 | `/api/events` | paged runs and captures (`offset`, filters, `q` search) |
 | `/api/event` | one run and/or capture (`run_id`, `capture_id`) with its log lines |
-| `/api/errors` | errors and health |
-| `/api/mcp` | MCP inventory |
-| `/api/destinations`, `/api/sensitive`, `/api/sessions`, `/api/usage` | the insights tabs |
+| `/api/errors` | errors, health, and which groups match the noise list |
+| `/api/noise` | the noise rules (the built-in list, or `~/.aidr-obs/known_noise.json` once you edit it) |
+| `/api/setup` | tap, debug-log and capture checks for the setup checklist |
+| `/api/mcp` | MCP inventory, collapsed when nothing changed |
+| `/api/destinations`, `/api/sensitive`, `/api/sessions`, `/api/usage` | the insights views |
 | `/api/session` | one session's timeline (`key=<agent>\|<session id>`) |
 | `/api/graph` | entity graph (`focus`, `max_nodes`) |
+| `/api/stream` | server-sent events: a hello, then ingest counts when the log or capture file changes |
 | `POST /api/ingest` | load new data; needs header `X-Aidr-Obs: 1` |
+| `POST /api/noise` | replace the noise rules (`{"rules":[...]}`); same header |
 
 Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which blocks
-DNS rebinding, and every response carries a restrictive Content-Security-Policy.
+DNS rebinding. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).
+Styles may be inline, because bar widths are set on the element.
 
 ## Development
 
 ```bash
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
+uv run python scripts/ui_smoke.py   # headless Chrome; skips itself when Chrome is absent
 ```
 
 Paths are overridable for tests: `AIDR_OBS_HOME`, `AIDR_OBS_LOG_DIR`, `AIDR_OBS_CLAUDE_DIR`,
@@ -203,5 +234,5 @@ Paths are overridable for tests: `AIDR_OBS_HOME`, `AIDR_OBS_LOG_DIR`, `AIDR_OBS_
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The bundled Cytoscape.js is MIT too; see
+MIT, see [LICENSE](LICENSE). The bundled Cytoscape.js, Preact and htm are MIT too; see
 [`src/aidr_obs/static/vendor/README.md`](src/aidr_obs/static/vendor/README.md).
