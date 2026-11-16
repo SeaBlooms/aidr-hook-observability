@@ -40,3 +40,15 @@ export function saveNoise(rules) {
     return body;
   });
 }
+
+export function askJev(captureId, force) {
+  return fetch("/api/event/review", {
+    method: "POST",
+    headers: { "X-Aidr-Obs": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ capture_id: captureId, force: !!force }),
+  }).then(async (response) => {
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Ask Jev failed (HTTP " + response.status + ")");
+    return body;
+  });
+}

@@ -227,6 +227,10 @@ main {
 .v-allow, .v-ok { color: var(--allow); } .v-context { color: var(--context); }
 .v-dry_run { color: var(--dry); } .v-other, .v-unknown, .v-incomplete { color: var(--other); }
 .v-failed, .v-no_key, .v-budget_exhausted { color: var(--block); }
+.v-agree { color: var(--allow); } .v-would_block { color: var(--block); } .v-would_allow { color: var(--ask); }
+.jev-box { margin: 10px 0 14px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.jev-box h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.jev-box .jev-err { color: var(--block); margin-top: 8px; }
 .c-loopback, .c-mcp { color: var(--context); } .c-private-ip { color: var(--ask); }
 .c-public-ip { color: var(--block); } .c-domain { color: var(--accent); }
 .filters, .chips, .row-actions, .table-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }

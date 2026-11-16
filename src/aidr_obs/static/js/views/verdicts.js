@@ -35,6 +35,15 @@ export class Verdicts extends LoadView {
           columns=${[
             { id: "ts", label: "When", sortValue: (row) => row.ts_ms, render: (row) => html`<${When} ts=${row.ts} />` },
             { id: "verdict", label: "Verdict", sortValue: (row) => row.verdict, render: (row) => html`<${Verdict} verdict=${row.verdict} mode=${mode} />` },
+            {
+              id: "jev",
+              label: "Jev",
+              sortValue: (row) => row.jev_stance || "",
+              render: (row) =>
+                row.jev_stance
+                  ? html`<span class=${"pill v-" + row.jev_stance}>${row.jev_stance}</span>`
+                  : html`<span class="muted">–</span>`,
+            },
             { id: "event", label: "Event", sortValue: (row) => row.event, render: (row) => html`<${EventName} name=${row.event} />` },
             { id: "tool", label: "Tool", sortValue: (row) => row.tool_name || "", render: (row) => html`<${ToolLabel} name=${row.tool_name} />` },
             { id: "reason", label: "Reason", truncate: true, sortValue: (row) => row.reason || "", exportValue: (row) => row.reason || "", render: (row) => clip(row.reason || "", 180) },

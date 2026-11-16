@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import graph, insights, logparse, noise, paths, store, tapinstall
+from . import graph, insights, jevreview, logparse, noise, paths, store, tapinstall
 
 STATIC = Path(__file__).with_name("static")
 HOST = "127.0.0.1"
@@ -174,11 +174,16 @@ def verdicts(conn: sqlite3.Connection, q: dict) -> dict:
     now = int(time.time() * 1000)
     cap_sql, cap_args = _span("ts_ms", since, until)
     marks = ",".join("?" * len(VERDICT_ACTIONS))
+    item_sql, item_args = _span("c.ts_ms", since, until)
     items = _rows(
         conn.execute(
-            "SELECT id, ts, ts_ms, event, tool_name, verdict, reason, session_id, run_id FROM captures"
-            " WHERE " + cap_sql + " AND verdict IN (" + marks + ") ORDER BY ts_ms DESC LIMIT 500",
-            (*cap_args, *VERDICT_ACTIONS),
+            "SELECT c.id, c.ts, c.ts_ms, c.event, c.tool_name, c.verdict, c.reason, c.session_id, c.run_id,"
+            " j.stance AS jev_stance"
+            " FROM captures c"
+            " LEFT JOIN jev_reviews j ON j.capture_id = c.id"
+            " WHERE " + item_sql + " AND c.verdict IN (" + marks + ")"
+            " ORDER BY c.ts_ms DESC LIMIT 500",
+            (*item_args, *VERDICT_ACTIONS),
         )
     )
     by_tool = _rows(
@@ -296,13 +301,22 @@ def event_detail(conn: sqlite3.Connection, q: dict) -> dict:
                 (run["agent"], run["pid"], run["start_ms"], run["end_ms"]),
             )
         )
+    jev_review = None
     if capture:
         for key in ("stdin_json", "stdout_text"):
             try:
                 capture[key] = json.loads(capture[key]) if capture[key] else capture[key]
             except ValueError:
                 pass
-    return {"run": run, "capture": capture, "lines": lines}
+        jev_review = jevreview.get_review(conn, capture["id"])
+    cfg = jevreview.config()
+    return {
+        "run": run,
+        "capture": capture,
+        "lines": lines,
+        "jev_review": jev_review,
+        "jev": {"configured": cfg["configured"], "base_url": cfg["base_url"]},
+    }
 
 
 def _health_level(conn: sqlite3.Connection, since: int, until: int | None) -> dict:
@@ -829,6 +843,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             return None
+        if path == "/api/event/review":
+            return self._post_review()
         if path == "/api/noise":
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -844,6 +860,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 400)
             return self._json({"rules": saved, "source": "user"})
         return self._send(404, b"not found", "text/plain")
+
+    def _post_review(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "bad Content-Length"}, 400)
+        if length < 0 or length > 64_000:
+            return self._json({"error": "body too large"}, 400)
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8") if length else b"{}")
+        except (UnicodeDecodeError, ValueError):
+            return self._json({"error": "body must be JSON"}, 400)
+        if not isinstance(body, dict):
+            return self._json({"error": "body must be a JSON object"}, 400)
+        capture_id = body.get("capture_id")
+        if not isinstance(capture_id, str) or not capture_id.strip():
+            return self._json({"error": "capture_id is required"}, 400)
+        force = bool(body.get("force"))
+        conn = store.connect()
+        try:
+            review = jevreview.review_capture(conn, capture_id.strip(), force=force)
+            self._json(review)
+        except KeyError as e:
+            self._json({"error": str(e)}, 404)
+        except jevreview.ReviewError as e:
+            self._json({"error": str(e)}, 502)
+        finally:
+            conn.close()
 
 
 def make_server(port: int) -> ThreadingHTTPServer:
