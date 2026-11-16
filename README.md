@@ -4,8 +4,11 @@ A local-only observability dashboard for AI-agent guardrail (AIDR) hooks in Clau
 and Cursor. It currently works with the [Noma](https://noma.security) guardrails hooks. It reads the hooks' debug logs and records what each hook
 received and what it decided, then shows it all on `http://127.0.0.1:8770/`.
 
-Nothing leaves the machine: the dashboard binds to loopback, loads no CDN assets,
-and the capture tap makes no network calls. The Noma plugin code is never modified.
+The dashboard binds to loopback, loads no CDN assets, and the capture tap makes no
+network calls. Optional **Ask Jev** in the event drawer sends one already-redacted
+capture to the local [jevai-dev-lab](../jevai-dev-lab) sandbox (`127.0.0.1:8790`), which
+forwards that prompt to Vercel AI Gateway — only when you click, never from the hook.
+The Noma plugin code is never modified.
 
 This is an independent project. It is not affiliated with, endorsed by or supported by
 Noma Security. "Noma" refers only to the guardrails plugins this tool observes
@@ -93,7 +96,7 @@ to icons; under 700px it becomes a menu.
 | Activity | one row per agent action (command, path, prompt). Expand a row for the hook events behind it, or switch to raw events. Filters and a detail drawer (payload, hook stdout, log lines) |
 | Sessions | per-session counts; open one for the prompt → tools → response timeline |
 | Graph | the entity graph described above |
-| Verdicts | decisions that did something (block, ask, mask, context) and verdicts per tool |
+| Verdicts | decisions that did something (block, ask, mask, context) and verdicts per tool; a Jev stance pill after you ask for a second opinion |
 | Sensitive access | credential and key files touched, unsandboxed Cursor shell commands, permission modes |
 | Destinations | hosts and MCP servers the agent asked to reach |
 | Hook health | failures, timeouts, a setup checklist, and the noise list |
@@ -167,6 +170,13 @@ What `tap install` changes:
 - **Verdicts** are classified from either decision format: Claude Code
   (`permissionDecision`, `decision: block`, `updatedInput`, ...) or Cursor
   (`permission: deny|ask|allow`, `continue: false`, `updated_*`).
+- **Ask Jev** (event drawer). On-demand second opinion from the sibling
+  `jevai-dev-lab` sandbox. Set `JEV_API_TOKEN` on the `aidr-obs serve` process to the
+  same value as `jevai-dev-lab/.env`, keep `uv run jev serve` running, then click
+  **Ask Jev**. Optional `JEV_BASE_URL` defaults to `http://127.0.0.1:8790` (loopback
+  only). The reply is `agree` / `would_block` / `would_allow` plus a short note,
+  cached in `aidr.db`; it never changes what the hook relayed. The tap never sees
+  the token and never calls Jev.
 
 ## Uninstall and recovery
 
@@ -216,6 +226,7 @@ The UI is a single static page over a JSON API on the same loopback port. Every 
 | `/api/stream` | server-sent events: a hello, then ingest counts when the log or capture file changes |
 | `POST /api/ingest` | load new data; needs header `X-Aidr-Obs: 1` |
 | `POST /api/noise` | replace the noise rules (`{"rules":[...]}`); same header |
+| `POST /api/event/review` | ask Jev for a second opinion (`capture_id`, optional `force`); needs `X-Aidr-Obs: 1` and `JEV_API_TOKEN` |
 
 Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which blocks
 DNS rebinding. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).

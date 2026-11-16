@@ -1,4 +1,4 @@
-import { getJSON } from "../api.js";
+import { askJev, getJSON } from "../api.js";
 import { duration, toolName } from "../format.js";
 import { Component, html } from "../html.js";
 import { go, update } from "../state.js";
@@ -20,7 +20,7 @@ function focusable(root) {
 export class Drawer extends Component {
   constructor() {
     super();
-    this.state = { data: null, error: null, loading: false };
+    this.state = { data: null, error: null, loading: false, jevBusy: false, jevError: "" };
     this._seq = 0;
     this.onKey = this.onKey.bind(this);
   }
@@ -46,17 +46,31 @@ export class Drawer extends Component {
     }
     const seq = ++this._seq;
     this._return = document.activeElement;
-    this.setState({ loading: true, error: null });
+    this.setState({ loading: true, error: null, jevBusy: false, jevError: "" });
     const params = ref.kind === "run" ? { run_id: ref.id } : { capture_id: ref.id };
     getJSON("/api/event", { since: 0 }, params)
       .then((data) => {
         if (seq !== this._seq) return;
-        this.setState({ data, loading: false, error: null });
+        this.setState({ data, loading: false, error: null, jevError: "" });
         const close = this.panel && this.panel.querySelector("[data-close]");
         if (close) close.focus();
       })
       .catch((err) => {
         if (seq === this._seq) this.setState({ loading: false, error: err.message || String(err) });
+      });
+  }
+
+  requestJev(force) {
+    const capture = this.state.data && this.state.data.capture;
+    if (!capture || this.state.jevBusy) return;
+    this.setState({ jevBusy: true, jevError: "" });
+    askJev(capture.id, force)
+      .then((review) => {
+        const data = { ...this.state.data, jev_review: review };
+        this.setState({ data, jevBusy: false, jevError: "" });
+      })
+      .catch((err) => {
+        this.setState({ jevBusy: false, jevError: err.message || String(err) });
       });
   }
 
@@ -125,6 +139,7 @@ export class Drawer extends Component {
       </div>
       ${capture
         ? html`<p><${Verdict} verdict=${capture.verdict} mode=${mode} /> ${capture.reason || ""}</p>
+            ${this.jevBox(data, capture)}
             <${KV} rows=${[
               ["When", html`<${When} ts=${capture.ts} />`],
               ["Tool", html`<${ToolLabel} name=${capture.tool_name} />`],
@@ -167,5 +182,40 @@ export class Drawer extends Component {
             )}</pre>
           </details>`
         : null}`;
+  }
+
+  jevBox(data, capture) {
+    const review = data.jev_review;
+    const configured = !!(data.jev && data.jev.configured);
+    const busy = this.state.jevBusy;
+    let body;
+    if (review) {
+      const persona = review.persona_sha256 ? " · persona " + review.persona_sha256.slice(0, 8) : "";
+      body = html`<p><span class=${"pill v-" + review.stance}>${review.stance}</span>
+          <span class="muted">${review.model || ""}${persona}</span></p>
+        <p>${review.note}</p>
+        <p class="muted">Second opinion only — does not change the hook decision.</p>
+        <div class="row-actions">
+          <button class="btn" type="button" disabled=${busy || !configured} onClick=${() => this.requestJev(true)}>
+            ${busy ? "Asking…" : "Ask again"}
+          </button>
+        </div>`;
+    } else if (!configured) {
+      body = html`<p class="muted">Set <code>JEV_API_TOKEN</code> on the <code>aidr-obs serve</code> process
+        (same value as <code>jevai-dev-lab/.env</code>) and run <code>uv run jev serve</code>.</p>`;
+    } else {
+      body = html`<p class="muted">Ask the local Jev sandbox for a second opinion on this redacted capture.
+        The reply is cached here; it does not change the hook decision.</p>
+        <div class="row-actions">
+          <button class="btn" type="button" disabled=${busy} onClick=${() => this.requestJev(false)}>
+            ${busy ? "Asking…" : "Ask Jev"}
+          </button>
+        </div>`;
+    }
+    return html`<section class="jev-box">
+      <h3>Jev review</h3>
+      ${body}
+      ${this.state.jevError ? html`<p class="jev-err" role="alert">${this.state.jevError}</p>` : null}
+    </section>`;
   }
 }

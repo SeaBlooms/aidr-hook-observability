@@ -96,6 +96,16 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     offset INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS jev_reviews (
+    capture_id TEXT PRIMARY KEY,
+    stance TEXT NOT NULL,
+    note TEXT NOT NULL,
+    model TEXT,
+    persona_sha256 TEXT,
+    asked_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jev_reviews_asked ON jev_reviews(asked_at);
 """
 
 _FINGERPRINT_BYTES = 256
@@ -298,18 +308,28 @@ def ingest_captures(conn: sqlite3.Connection, data_dir: Path | None = None) -> i
 
 
 def link_captures(conn: sqlite3.Connection) -> None:
-    """Join each capture to the debug-log run of its child hook process (same pid, close in time)."""
+    """Join each capture to the debug-log run of its child hook process (same pid, close in time).
+
+    Nearest ``start_ms`` within the window wins. SQLite rejects ``ORDER BY`` expressions that
+    reference the outer ``captures`` row (``no such column: captures.ts_ms``), so the distance
+    is matched with ``MIN`` instead; ties break on the earliest ``start_ms``.
+    """
     conn.execute(
         """
         UPDATE captures SET run_id = (
             SELECT r.run_id FROM runs r
             WHERE r.pid = captures.child_pid AND r.agent = captures.agent
               AND ABS(r.start_ms - captures.ts_ms) <= ?
-            ORDER BY ABS(r.start_ms - captures.ts_ms) LIMIT 1
+              AND ABS(r.start_ms - captures.ts_ms) = (
+                  SELECT MIN(ABS(r2.start_ms - captures.ts_ms)) FROM runs r2
+                  WHERE r2.pid = captures.child_pid AND r2.agent = captures.agent
+                    AND ABS(r2.start_ms - captures.ts_ms) <= ?
+              )
+            ORDER BY r.start_ms LIMIT 1
         )
         WHERE child_pid IS NOT NULL
         """,
-        (_LINK_WINDOW_MS,),
+        (_LINK_WINDOW_MS, _LINK_WINDOW_MS),
     )
 
 
@@ -348,6 +368,12 @@ def prune(conn: sqlite3.Connection, days: int, data_dir: Path | None = None) -> 
     with conn:
         captures = conn.execute("DELETE FROM captures WHERE ts_ms < ?", (cutoff,)).rowcount
         lines = conn.execute("DELETE FROM log_lines WHERE ts_ms < ?", (cutoff,)).rowcount
+        reviews = conn.execute("DELETE FROM jev_reviews WHERE capture_id NOT IN (SELECT id FROM captures)").rowcount
         rebuild_runs(conn)
         link_captures(conn)
-    return {"captures_deleted": captures, "log_lines_deleted": lines, "capture_records_dropped": rewritten}
+    return {
+        "captures_deleted": captures,
+        "log_lines_deleted": lines,
+        "capture_records_dropped": rewritten,
+        "jev_reviews_deleted": reviews,
+    }
