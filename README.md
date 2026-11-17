@@ -6,7 +6,7 @@ received and what it decided, then shows it all on `http://127.0.0.1:8770/`.
 
 The dashboard binds to loopback, loads no CDN assets, and the capture tap makes no
 network calls. Optional **Ask Jev** in the event drawer sends one already-redacted
-capture to the local [jevai-dev-lab](../jevai-dev-lab) sandbox (`127.0.0.1:8790`), which
+capture to the local [jevai-dev-lab](https://github.com/SeaBlooms/jevai-dev-lab) sandbox (`127.0.0.1:8790`), which
 forwards that prompt to Vercel AI Gateway — only when you click, never from the hook.
 The Noma plugin code is never modified.
 
@@ -171,10 +171,11 @@ What `tap install` changes:
   (`permissionDecision`, `decision: block`, `updatedInput`, ...) or Cursor
   (`permission: deny|ask|allow`, `continue: false`, `updated_*`).
 - **Ask Jev** (event drawer). On-demand second opinion from the sibling
-  `jevai-dev-lab` sandbox. Set `JEV_API_TOKEN` on the `aidr-obs serve` process to the
-  same value as `jevai-dev-lab/.env`, keep `uv run jev serve` running, then click
-  **Ask Jev**. Optional `JEV_BASE_URL` defaults to `http://127.0.0.1:8790` (loopback
-  only). The reply is `agree` / `would_block` / `would_allow` plus a short note,
+  [jevai-dev-lab](https://github.com/SeaBlooms/jevai-dev-lab) sandbox. Set
+  `JEV_API_TOKEN` on the `aidr-obs serve` process to the same value as that
+  repo's `.env`, keep `uv run jev serve` running, then click **Ask Jev**.
+  Optional `JEV_BASE_URL` defaults to `http://127.0.0.1:8790` (loopback only).
+  The reply is `agree` / `would_block` / `would_allow` plus a short note,
   cached in `aidr.db`; it never changes what the hook relayed. The tap never sees
   the token and never calls Jev.
 
@@ -235,10 +236,14 @@ Styles may be inline, because bar widths are set on the element.
 ## Development
 
 ```bash
+uv sync --group dev
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/ui_smoke.py   # headless Chrome; skips itself when Chrome is absent
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same ruff checks and pytest on every push and PR
+(Python 3.12 via uv). The UI smoke script is local-only; CI skips it when Chrome is absent.
 
 Paths are overridable for tests: `AIDR_OBS_HOME`, `AIDR_OBS_LOG_DIR`, `AIDR_OBS_CLAUDE_DIR`,
 `AIDR_OBS_CURSOR_DIR`, `AIDR_OBS_HOOK`, `AIDR_OBS_CHILD_TIMEOUT`.
