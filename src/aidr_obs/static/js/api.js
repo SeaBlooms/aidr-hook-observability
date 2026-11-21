@@ -41,11 +41,11 @@ export function saveNoise(rules) {
   });
 }
 
-export function askJev(captureId, force) {
+export function askJev(captureId, force, backend) {
   return fetch("/api/event/review", {
     method: "POST",
     headers: { "X-Aidr-Obs": "1", "Content-Type": "application/json" },
-    body: JSON.stringify({ capture_id: captureId, force: !!force }),
+    body: JSON.stringify({ capture_id: captureId, force: !!force, backend: backend || null }),
   }).then(async (response) => {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Ask Jev failed (HTTP " + response.status + ")");

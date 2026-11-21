@@ -97,13 +97,18 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     updated_ms INTEGER NOT NULL
 );
 
+"""
+
+JEV_REVIEWS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS jev_reviews (
-    capture_id TEXT PRIMARY KEY,
+    capture_id TEXT NOT NULL,
+    backend TEXT NOT NULL,
     stance TEXT NOT NULL,
     note TEXT NOT NULL,
     model TEXT,
     persona_sha256 TEXT,
-    asked_at INTEGER NOT NULL
+    asked_at INTEGER NOT NULL,
+    PRIMARY KEY (capture_id, backend)
 );
 CREATE INDEX IF NOT EXISTS jev_reviews_asked ON jev_reviews(asked_at);
 """
@@ -120,12 +125,34 @@ def connect(db_file: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate_jev_reviews(conn)
     if new:
         try:
             os.chmod(db_file, 0o600)
         except OSError:
             pass
     return conn
+
+
+def _migrate_jev_reviews(conn: sqlite3.Connection) -> None:
+    """Create jev_reviews, or rekey a pre-backend table by (capture_id, backend).
+
+    Rows from before backend selection all came from the AI Gateway, so they become 'gateway'.
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(jev_reviews)")]
+    if cols and "backend" not in cols:
+        with conn:
+            conn.execute("ALTER TABLE jev_reviews RENAME TO jev_reviews_v1")
+            conn.execute("DROP INDEX IF EXISTS jev_reviews_asked")
+    conn.executescript(JEV_REVIEWS_SCHEMA)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jev_reviews_v1'").fetchone():
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jev_reviews"
+                " (capture_id, backend, stance, note, model, persona_sha256, asked_at)"
+                " SELECT capture_id, 'gateway', stance, note, model, persona_sha256, asked_at FROM jev_reviews_v1"
+            )
+            conn.execute("DROP TABLE jev_reviews_v1")
 
 
 def _fingerprint(path: Path) -> str:

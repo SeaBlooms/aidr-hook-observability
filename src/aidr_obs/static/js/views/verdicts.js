@@ -39,10 +39,16 @@ export class Verdicts extends LoadView {
               id: "jev",
               label: "Jev",
               sortValue: (row) => row.jev_stance || "",
-              render: (row) =>
-                row.jev_stance
-                  ? html`<span class=${"pill v-" + row.jev_stance}>${row.jev_stance}</span>`
-                  : html`<span class="muted">–</span>`,
+              exportValue: (row) => jevStances(row).map(([backend, stance]) => backend + ":" + stance).join(" "),
+              render: (row) => {
+                const stances = jevStances(row);
+                return stances.length
+                  ? stances.map(
+                      ([backend, stance]) =>
+                        html`<span class=${"pill v-" + stance} key=${backend} title=${"Jev via " + backend}>${backend[0]}: ${stance}</span>`,
+                    )
+                  : html`<span class="muted">–</span>`;
+              },
             },
             { id: "event", label: "Event", sortValue: (row) => row.event, render: (row) => html`<${EventName} name=${row.event} />` },
             { id: "tool", label: "Tool", sortValue: (row) => row.tool_name || "", render: (row) => html`<${ToolLabel} name=${row.tool_name} />` },
@@ -90,6 +96,10 @@ export class Verdicts extends LoadView {
           ]} />
       </section>`;
   }
+}
+
+function jevStances(row) {
+  return Object.entries(row.jev_stances || {}).sort(([a], [b]) => a.localeCompare(b));
 }
 
 function mix(counts, mode) {
