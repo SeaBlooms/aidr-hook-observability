@@ -34,8 +34,9 @@ def main(argv=None) -> int:
     if args.cmd == "ingest":
         _print(store.ingest(store.connect()))
     elif args.cmd == "serve":
-        from . import server
+        from . import jevreview, server
 
+        jevreview.load_env_file()
         server.serve(args.port, ingest_first=not args.no_ingest)
     elif args.cmd == "tap":
         if args.action == "install":

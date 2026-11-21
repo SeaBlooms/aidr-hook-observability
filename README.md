@@ -171,10 +171,12 @@ What `tap install` changes:
   (`permissionDecision`, `decision: block`, `updatedInput`, ...) or Cursor
   (`permission: deny|ask|allow`, `continue: false`, `updated_*`).
 - **Ask Jev** (event drawer). On-demand second opinion from the sibling
-  [jevai-dev-lab](https://github.com/SeaBlooms/jevai-dev-lab) sandbox. Set
-  `JEV_API_TOKEN` on the `aidr-obs serve` process to the same value as that
-  repo's `.env`, keep `uv run jev serve` running, then click **Ask Jev**.
+  [jevai-dev-lab](https://github.com/SeaBlooms/jevai-dev-lab) sandbox. Copy
+  `.env.example` to `.env` and set `JEV_API_TOKEN` to the same value as that
+  repo's `.env` (or export it in the shell, which wins over the file). Then restart
+  `aidr-obs serve`, keep `uv run jev serve` running, and click **Ask Jev**.
   Optional `JEV_BASE_URL` defaults to `http://127.0.0.1:8790` (loopback only).
+  Only `aidr-obs serve` reads `.env`, and only its `JEV_*` keys.
   The reply is `agree` / `would_block` / `would_allow` plus a short note,
   cached in `aidr.db`; it never changes what the hook relayed. The tap never sees
   the token and never calls Jev.

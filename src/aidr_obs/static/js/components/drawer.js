@@ -201,8 +201,9 @@ export class Drawer extends Component {
           </button>
         </div>`;
     } else if (!configured) {
-      body = html`<p class="muted">Set <code>JEV_API_TOKEN</code> on the <code>aidr-obs serve</code> process
-        (same value as <code>jevai-dev-lab/.env</code>) and run <code>uv run jev serve</code>.</p>`;
+      body = html`<p class="muted">Add <code>JEV_API_TOKEN</code> to <code>aidr-hook-observability/.env</code>
+        (same value as <code>jevai-dev-lab/.env</code>), restart <code>aidr-obs serve</code>, and run
+        <code>uv run jev serve</code>.</p>`;
     } else {
       body = html`<p class="muted">Ask the local Jev sandbox for a second opinion on this redacted capture.
         The reply is cached here; it does not change the hook decision.</p>

@@ -3,7 +3,7 @@
 Called only from the dashboard (never from the tap). Stdlib urllib only: the
 serve process may talk to the local Jev sandbox; the tap stays offline.
 
-Env (on `aidr-obs serve`):
+Env (on `aidr-obs serve`, or JEV_* lines in this repo's .env):
   JEV_API_TOKEN  — required to ask; same value as jevai-dev-lab/.env
   JEV_BASE_URL   — default http://127.0.0.1:8790; host must be loopback
 """
@@ -17,11 +17,13 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlsplit
 
 STANCES = ("agree", "would_block", "would_allow")
 CASE_ID = "verdict-review"
 DEFAULT_BASE = "http://127.0.0.1:8790"
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 TIMEOUT_SECONDS = 130.0
 PAYLOAD_LIMIT = 4000
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -30,6 +32,32 @@ _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL | re.IGN
 
 class ReviewError(Exception):
     """User-facing failure; message is safe to show in the UI (no secrets)."""
+
+
+def load_env_file(path: Path | None = None) -> list[str]:
+    """Copy JEV_* keys from a .env file into os.environ without overriding exported values.
+
+    Returns the keys it set. A missing file is not an error.
+    """
+    env_path = path or ENV_FILE
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    loaded = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if not key.startswith("JEV_") or key in os.environ:
+            continue
+        os.environ[key] = value
+        loaded.append(key)
+    return loaded
 
 
 def config() -> dict:
@@ -109,7 +137,7 @@ def ask_jev(capture: dict, *, token: str | None = None, base_url: str | None = N
     cfg = config()
     tok = (token if token is not None else cfg["token"]).strip()
     if not tok:
-        raise ReviewError("JEV_API_TOKEN is not set on the aidr-obs serve process")
+        raise ReviewError("JEV_API_TOKEN is not set (add it to .env and restart aidr-obs serve)")
     base = assert_loopback_base(base_url if base_url is not None else cfg["base_url"])
     prompt = build_prompt(capture)
     body = json.dumps({"prompt": prompt, "case_id": CASE_ID}).encode()

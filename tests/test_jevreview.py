@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -112,6 +113,35 @@ def test_non_loopback_base_refused(monkeypatch):
     monkeypatch.setenv("JEV_BASE_URL", "http://8.8.8.8:8790")
     with pytest.raises(jevreview.ReviewError, match="loopback"):
         jevreview.ask_jev({"verdict": "block", "reason": "x"})
+
+
+def test_load_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\n"
+        "\n"
+        "JEV_API_TOKEN='from-file'\n"
+        'export JEV_BASE_URL="http://127.0.0.1:9999"\n'
+        "AIDR_OBS_HOME=/should/not/load\n"
+        "not a pair\n",
+        encoding="utf-8",
+    )
+    for key in ("JEV_API_TOKEN", "JEV_BASE_URL", "AIDR_OBS_HOME"):
+        monkeypatch.setenv(key, "")  # registers the key so teardown restores it
+        monkeypatch.delenv(key)
+    assert sorted(jevreview.load_env_file(env_file)) == ["JEV_API_TOKEN", "JEV_BASE_URL"]
+    cfg = jevreview.config()
+    assert cfg["token"] == "from-file" and cfg["base_url"] == "http://127.0.0.1:9999"
+    assert "AIDR_OBS_HOME" not in os.environ
+
+
+def test_load_env_file_keeps_exported_and_missing_ok(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JEV_API_TOKEN=from-file\n", encoding="utf-8")
+    monkeypatch.setenv("JEV_API_TOKEN", "from-shell")
+    assert jevreview.load_env_file(env_file) == []
+    assert jevreview.config()["token"] == "from-shell"
+    assert jevreview.load_env_file(tmp_path / "missing.env") == []
 
 
 def test_ask_and_cache(env, fake_jev):
