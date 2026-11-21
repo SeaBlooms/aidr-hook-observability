@@ -178,14 +178,19 @@ def verdicts(conn: sqlite3.Connection, q: dict) -> dict:
     items = _rows(
         conn.execute(
             "SELECT c.id, c.ts, c.ts_ms, c.event, c.tool_name, c.verdict, c.reason, c.session_id, c.run_id,"
-            " j.stance AS jev_stance"
+            " (SELECT j.stance FROM jev_reviews j WHERE j.capture_id = c.id"
+            "  ORDER BY j.asked_at DESC LIMIT 1) AS jev_stance,"
+            " (SELECT group_concat(j.backend || ':' || j.stance, ',') FROM jev_reviews j"
+            "  WHERE j.capture_id = c.id) AS jev_stances"
             " FROM captures c"
-            " LEFT JOIN jev_reviews j ON j.capture_id = c.id"
             " WHERE " + item_sql + " AND c.verdict IN (" + marks + ")"
             " ORDER BY c.ts_ms DESC LIMIT 500",
             (*item_args, *VERDICT_ACTIONS),
         )
     )
+    for item in items:
+        pairs = (part.partition(":") for part in (item["jev_stances"] or "").split(",") if part)
+        item["jev_stances"] = {backend: stance for backend, _, stance in pairs}
     by_tool = _rows(
         conn.execute(
             "SELECT COALESCE(tool_name, '(' || COALESCE(event, '?') || ')') AS tool, verdict, COUNT(*) AS n"
@@ -302,20 +307,23 @@ def event_detail(conn: sqlite3.Connection, q: dict) -> dict:
             )
         )
     jev_review = None
+    jev_reviews: list[dict] = []
     if capture:
         for key in ("stdin_json", "stdout_text"):
             try:
                 capture[key] = json.loads(capture[key]) if capture[key] else capture[key]
             except ValueError:
                 pass
-        jev_review = jevreview.get_review(conn, capture["id"])
+        jev_reviews = jevreview.list_reviews(conn, capture["id"])
+        jev_review = max(jev_reviews, key=lambda r: r["asked_at"], default=None)
     cfg = jevreview.config()
     return {
         "run": run,
         "capture": capture,
         "lines": lines,
         "jev_review": jev_review,
-        "jev": {"configured": cfg["configured"], "base_url": cfg["base_url"]},
+        "jev_reviews": jev_reviews,
+        "jev": {"configured": cfg["configured"], "base_url": cfg["base_url"], "backends": list(jevreview.BACKENDS)},
     }
 
 
@@ -878,9 +886,12 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(capture_id, str) or not capture_id.strip():
             return self._json({"error": "capture_id is required"}, 400)
         force = bool(body.get("force"))
+        backend = body.get("backend")
+        if backend is not None and backend not in jevreview.BACKENDS:
+            return self._json({"error": "backend must be one of " + ", ".join(jevreview.BACKENDS)}, 400)
         conn = store.connect()
         try:
-            review = jevreview.review_capture(conn, capture_id.strip(), force=force)
+            review = jevreview.review_capture(conn, capture_id.strip(), force=force, backend=backend)
             self._json(review)
         except KeyError as e:
             self._json({"error": str(e)}, 404)

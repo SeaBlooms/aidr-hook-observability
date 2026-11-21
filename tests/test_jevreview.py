@@ -38,6 +38,8 @@ class _FakeJev(BaseHTTPRequestHandler):
     reply_text = json.dumps({"stance": "agree", "note": "Blocking the SSH key read is correct."})
     status = 200
     last_body = None
+    bodies: list = []
+    answer_backend = "echo"
 
     def log_message(self, fmt, *args):
         pass
@@ -46,6 +48,7 @@ class _FakeJev(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         type(self).last_body = json.loads(raw.decode()) if raw else None
+        type(self).bodies.append(type(self).last_body)
         type(self).hits += 1
         auth = self.headers.get("Authorization") or ""
         if auth != "Bearer test-token":
@@ -57,9 +60,12 @@ class _FakeJev(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        requested = (type(self).last_body or {}).get("backend")
+        answer = type(self).answer_backend
         body = json.dumps(
             {
                 "text": type(self).reply_text,
+                "backend": (requested or "gateway") if answer == "echo" else answer,
                 "model": "fake/model",
                 "persona_sha256": "abc123persona",
                 "case_id": (type(self).last_body or {}).get("case_id"),
@@ -78,6 +84,8 @@ def fake_jev(monkeypatch):
     _FakeJev.reply_text = json.dumps({"stance": "agree", "note": "Blocking the SSH key read is correct."})
     _FakeJev.status = 200
     _FakeJev.last_body = None
+    _FakeJev.bodies = []
+    _FakeJev.answer_backend = "echo"
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _FakeJev)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -163,6 +171,86 @@ def test_ask_and_cache(env, fake_jev):
     assert fake_jev["handler"].hits == 2
 
 
+def test_default_backend_omits_field_and_stores_answer(env, fake_jev):
+    _capture(env)
+    conn = store.connect()
+    store.ingest(conn)
+    review = jevreview.review_capture(conn, "cap1")
+    assert "backend" not in fake_jev["handler"].last_body
+    assert review["backend"] == "gateway"
+
+
+def test_reviews_cached_per_backend(env, fake_jev):
+    _capture(env)
+    conn = store.connect()
+    store.ingest(conn)
+    gw = jevreview.review_capture(conn, "cap1", backend="gateway")
+    assert gw["backend"] == "gateway" and fake_jev["handler"].last_body["backend"] == "gateway"
+
+    fake_jev["handler"].reply_text = json.dumps({"stance": "would_allow", "note": "local model disagrees"})
+    local = jevreview.review_capture(conn, "cap1", backend="ollama")
+    assert local["backend"] == "ollama" and local["cached"] is False
+    assert fake_jev["handler"].hits == 2
+
+    again = jevreview.review_capture(conn, "cap1", backend="gateway")
+    assert again["cached"] is True and again["stance"] == "agree"
+    assert fake_jev["handler"].hits == 2
+    assert [(r["backend"], r["stance"]) for r in jevreview.list_reviews(conn, "cap1")] == [
+        ("gateway", "agree"),
+        ("ollama", "would_allow"),
+    ]
+
+
+def test_backend_mismatch_rejected(env, fake_jev):
+    _capture(env)
+    conn = store.connect()
+    store.ingest(conn)
+    fake_jev["handler"].answer_backend = None
+    with pytest.raises(jevreview.ReviewError, match="backend selection"):
+        jevreview.review_capture(conn, "cap1", backend="ollama")
+    assert jevreview.list_reviews(conn, "cap1") == []
+
+
+def test_unknown_backend_refused(env):
+    with pytest.raises(jevreview.ReviewError, match="backend must be"):
+        jevreview.ask_jev({"verdict": "block"}, backend="cloud")
+
+
+def test_migrates_pre_backend_reviews(env):
+    import sqlite3
+
+    from aidr_obs import paths
+
+    db = paths.db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    old = sqlite3.connect(db)
+    old.executescript(
+        "CREATE TABLE jev_reviews (capture_id TEXT PRIMARY KEY, stance TEXT NOT NULL, note TEXT NOT NULL,"
+        " model TEXT, persona_sha256 TEXT, asked_at INTEGER NOT NULL);"
+        "CREATE INDEX jev_reviews_asked ON jev_reviews(asked_at);"
+        "INSERT INTO jev_reviews VALUES ('cap1', 'agree', 'old note', 'anthropic/x', 'p', 1);"
+    )
+    old.commit()
+    old.close()
+
+    conn = store.connect()
+    assert jevreview.list_reviews(conn, "cap1") == [
+        {
+            "capture_id": "cap1",
+            "backend": "gateway",
+            "stance": "agree",
+            "note": "old note",
+            "model": "anthropic/x",
+            "persona_sha256": "p",
+            "asked_at": 1,
+        }
+    ]
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "jev_reviews_v1" not in tables
+    conn.close()
+    assert len(jevreview.list_reviews(store.connect(), "cap1")) == 1
+
+
 def test_bad_reply_not_cached(env, fake_jev):
     _capture(env)
     conn = store.connect()
@@ -238,3 +326,35 @@ def test_api_review_and_event_detail(dash, fake_jev):
     conn.close()
     match = next(i for i in verdicts["items"] if i["id"] == "cap1")
     assert match["jev_stance"] == "agree"
+    assert match["jev_stances"] == {"gateway": "agree"}
+
+
+def _get(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    res = conn.getresponse()
+    data = json.loads(res.read())
+    conn.close()
+    return res.status, data
+
+
+def test_api_both_backends_one_verdict_row(dash, fake_jev):
+    assert _post_review(dash, {"capture_id": "cap1", "backend": "gateway"})[0] == 200
+    fake_jev["handler"].reply_text = json.dumps({"stance": "would_allow", "note": "too strict"})
+    status, data = _post_review(dash, {"capture_id": "cap1", "backend": "ollama"})
+    assert status == 200 and data["backend"] == "ollama"
+
+    _, detail = _get(dash, "/api/event?capture_id=cap1")
+    assert [r["backend"] for r in detail["jev_reviews"]] == ["gateway", "ollama"]
+    assert detail["jev"]["backends"] == ["gateway", "ollama"]
+
+    _, verdicts = _get(dash, "/api/verdicts?since=0")
+    rows = [i for i in verdicts["items"] if i["id"] == "cap1"]
+    assert len(rows) == 1
+    assert rows[0]["jev_stances"] == {"gateway": "agree", "ollama": "would_allow"}
+
+
+def test_api_rejects_unknown_backend(dash, fake_jev):
+    status, data = _post_review(dash, {"capture_id": "cap1", "backend": "cloud"})
+    assert status == 400 and "backend" in data["error"]
+    assert fake_jev["handler"].hits == 0

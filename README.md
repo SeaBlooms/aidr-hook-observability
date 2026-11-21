@@ -7,7 +7,8 @@ received and what it decided, then shows it all on `http://127.0.0.1:8770/`.
 The dashboard binds to loopback, loads no CDN assets, and the capture tap makes no
 network calls. Optional **Ask Jev** in the event drawer sends one already-redacted
 capture to the local [jevai-dev-lab](https://github.com/SeaBlooms/jevai-dev-lab) sandbox (`127.0.0.1:8790`), which
-forwards that prompt to Vercel AI Gateway — only when you click, never from the hook.
+forwards that prompt to Vercel AI Gateway or to an Ollama box on your LAN, whichever
+backend you pick — only when you click, never from the hook.
 The Noma plugin code is never modified.
 
 This is an independent project. It is not affiliated with, endorsed by or supported by
@@ -177,6 +178,11 @@ What `tap install` changes:
   `aidr-obs serve`, keep `uv run jev serve` running, and click **Ask Jev**.
   Optional `JEV_BASE_URL` defaults to `http://127.0.0.1:8790` (loopback only).
   Only `aidr-obs serve` reads `.env`, and only its `JEV_*` keys.
+  Jev has two backends: `gateway` (Claude via Vercel AI Gateway) and `ollama`
+  (`qwen3:8b` on the homelab box). The drawer has **Ask gateway**, **Ask ollama**
+  and **Ask both** buttons. Replies are cached per backend, and the drawer flags it
+  when the two disagree. The Verdicts table shows one pill per backend (`g:` / `o:`).
+  Reviews cached before backend selection existed are kept as `gateway`.
   The reply is `agree` / `would_block` / `would_allow` plus a short note,
   cached in `aidr.db`; it never changes what the hook relayed. The tap never sees
   the token and never calls Jev.
@@ -229,7 +235,7 @@ The UI is a single static page over a JSON API on the same loopback port. Every 
 | `/api/stream` | server-sent events: a hello, then ingest counts when the log or capture file changes |
 | `POST /api/ingest` | load new data; needs header `X-Aidr-Obs: 1` |
 | `POST /api/noise` | replace the noise rules (`{"rules":[...]}`); same header |
-| `POST /api/event/review` | ask Jev for a second opinion (`capture_id`, optional `force`); needs `X-Aidr-Obs: 1` and `JEV_API_TOKEN` |
+| `POST /api/event/review` | ask Jev for a second opinion (`capture_id`, optional `force`, optional `backend`: `gateway` or `ollama`, else Jev's default); needs `X-Aidr-Obs: 1` and `JEV_API_TOKEN` |
 
 Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which blocks
 DNS rebinding. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).

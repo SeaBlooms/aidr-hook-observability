@@ -60,18 +60,25 @@ export class Drawer extends Component {
       });
   }
 
-  requestJev(force) {
+  requestJev(backends) {
     const capture = this.state.data && this.state.data.capture;
     if (!capture || this.state.jevBusy) return;
+    const have = new Set((this.state.data.jev_reviews || []).map((review) => review.backend));
+    const seq = this._seq;
     this.setState({ jevBusy: true, jevError: "" });
-    askJev(capture.id, force)
-      .then((review) => {
-        const data = { ...this.state.data, jev_review: review };
-        this.setState({ data, jevBusy: false, jevError: "" });
-      })
-      .catch((err) => {
-        this.setState({ jevBusy: false, jevError: err.message || String(err) });
+    Promise.allSettled(backends.map((backend) => askJev(capture.id, have.has(backend), backend))).then((results) => {
+      if (seq !== this._seq || !this.state.data) return;
+      const byBackend = new Map((this.state.data.jev_reviews || []).map((review) => [review.backend, review]));
+      const errors = [];
+      results.forEach((result, i) => {
+        if (result.status === "fulfilled") byBackend.set(result.value.backend, result.value);
+        else errors.push(backends[i] + ": " + (result.reason.message || String(result.reason)));
       });
+      const reviews = [...byBackend.values()].sort((a, b) => a.backend.localeCompare(b.backend));
+      const latest = reviews.reduce((best, review) => (!best || review.asked_at > best.asked_at ? review : best), null);
+      const data = { ...this.state.data, jev_reviews: reviews, jev_review: latest };
+      this.setState({ data, jevBusy: false, jevError: errors.join("\n") });
+    });
   }
 
   close() {
@@ -139,7 +146,7 @@ export class Drawer extends Component {
       </div>
       ${capture
         ? html`<p><${Verdict} verdict=${capture.verdict} mode=${mode} /> ${capture.reason || ""}</p>
-            ${this.jevBox(data, capture)}
+            ${this.jevBox(data)}
             <${KV} rows=${[
               ["When", html`<${When} ts=${capture.ts} />`],
               ["Tool", html`<${ToolLabel} name=${capture.tool_name} />`],
@@ -184,32 +191,44 @@ export class Drawer extends Component {
         : null}`;
   }
 
-  jevBox(data, capture) {
-    const review = data.jev_review;
+  jevBox(data) {
+    const reviews = data.jev_reviews || [];
     const configured = !!(data.jev && data.jev.configured);
+    const backends = (data.jev && data.jev.backends) || ["gateway", "ollama"];
     const busy = this.state.jevBusy;
+    const have = new Set(reviews.map((review) => review.backend));
+    const stances = new Set(reviews.map((review) => review.stance));
     let body;
-    if (review) {
-      const persona = review.persona_sha256 ? " · persona " + review.persona_sha256.slice(0, 8) : "";
-      body = html`<p><span class=${"pill v-" + review.stance}>${review.stance}</span>
-          <span class="muted">${review.model || ""}${persona}</span></p>
-        <p>${review.note}</p>
-        <p class="muted">Second opinion only — does not change the hook decision.</p>
-        <div class="row-actions">
-          <button class="btn" type="button" disabled=${busy || !configured} onClick=${() => this.requestJev(true)}>
-            ${busy ? "Asking…" : "Ask again"}
-          </button>
-        </div>`;
-    } else if (!configured) {
+    if (!configured) {
       body = html`<p class="muted">Add <code>JEV_API_TOKEN</code> to <code>aidr-hook-observability/.env</code>
         (same value as <code>jevai-dev-lab/.env</code>), restart <code>aidr-obs serve</code>, and run
         <code>uv run jev serve</code>.</p>`;
     } else {
-      body = html`<p class="muted">Ask the local Jev sandbox for a second opinion on this redacted capture.
-        The reply is cached here; it does not change the hook decision.</p>
+      body = html`${reviews.length
+          ? html`${reviews.map((review) => {
+                const persona = review.persona_sha256 ? " · persona " + review.persona_sha256.slice(0, 8) : "";
+                return html`<div class="jev-review" key=${review.backend}>
+                  <p><span class=${"pill v-" + review.stance}>${review.stance}</span>
+                    <strong>${review.backend}</strong>
+                    <span class="muted"> ${review.model || ""}${persona}</span></p>
+                  <p>${review.note}</p>
+                </div>`;
+              })}
+              ${reviews.length > 1 && stances.size > 1
+                ? html`<p class="jev-disagree">The backends disagree on this verdict.</p>`
+                : null}
+              <p class="muted">Second opinion only — does not change the hook decision.</p>`
+          : html`<p class="muted">Ask the local Jev sandbox for a second opinion on this redacted capture.
+              Replies are cached here per backend; they do not change the hook decision.</p>`}
         <div class="row-actions">
-          <button class="btn" type="button" disabled=${busy} onClick=${() => this.requestJev(false)}>
-            ${busy ? "Asking…" : "Ask Jev"}
+          ${backends.map(
+            (backend) => html`<button class="btn" type="button" key=${backend} disabled=${busy}
+              onClick=${() => this.requestJev([backend])}>
+              ${"Ask " + backend + (have.has(backend) ? " again" : "")}
+            </button>`,
+          )}
+          <button class="btn" type="button" disabled=${busy} onClick=${() => this.requestJev(backends)}>
+            ${busy ? "Asking…" : "Ask both"}
           </button>
         </div>`;
     }
