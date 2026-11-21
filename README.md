@@ -25,6 +25,11 @@ These are fixture runs. Commands, hosts, paths, and session ids are covered.
 
 <img alt="Graph: agents, projects, sessions, tools, and destinations" src="docs/screenshots/graph.png" width="900">
 
+Ask Jev in the event drawer, with second opinions from both backends (Claude via AI Gateway and
+`qwen3:8b` on the homelab Ollama box) on one live capture:
+
+<img alt="Jev review: gateway and ollama stances and notes on one capture, with Ask gateway, Ask ollama and Ask both buttons" src="docs/screenshots/jev-review.jpg" width="700">
+
 ## Status
 
 - Works with Claude Code and Cursor. The capture tap sits in front of the installed Noma hooks
