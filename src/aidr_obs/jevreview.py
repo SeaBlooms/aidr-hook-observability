@@ -6,10 +6,13 @@ serve process may talk to the local Jev sandbox; the tap stays offline.
 Env (on `aidr-obs serve`, or JEV_* lines in this repo's .env):
   JEV_API_TOKEN  — required to ask; same value as jevai-dev-lab/.env
   JEV_BASE_URL   — default http://127.0.0.1:8790; host must be loopback
+  AIDR_OBS_JEV_HOSTS — extra host names allowed in JEV_BASE_URL, comma-separated (for
+                   example the compose service name `jev`). IP literals here are ignored.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -69,15 +72,31 @@ def config() -> dict:
     return {"token": token, "base_url": base, "configured": bool(token)}
 
 
+def extra_jev_hosts() -> frozenset[str]:
+    """Host names from AIDR_OBS_JEV_HOSTS. IP literals are dropped so only names can widen the check."""
+    names = set()
+    for raw in (os.environ.get("AIDR_OBS_JEV_HOSTS") or "").split(","):
+        name = raw.strip().lower()
+        if not name:
+            continue
+        try:
+            ipaddress.ip_address(name)
+        except ValueError:
+            names.add(name)
+    return frozenset(names)
+
+
 def assert_loopback_base(base_url: str) -> str:
-    """Raise ReviewError unless the URL host is loopback. Returns the normalized base."""
+    """Raise ReviewError unless the URL host is loopback or allowlisted. Returns the normalized base."""
     base = (base_url or DEFAULT_BASE).strip().rstrip("/") or DEFAULT_BASE
     parts = urlsplit(base)
     if parts.scheme not in ("http", "https"):
         raise ReviewError("JEV_BASE_URL must be http or https on loopback")
     host = (parts.hostname or "").lower()
-    if host not in _LOOPBACK:
-        raise ReviewError("JEV_BASE_URL host must be loopback (127.0.0.1, localhost, or ::1)")
+    if host not in _LOOPBACK and host not in extra_jev_hosts():
+        raise ReviewError(
+            "JEV_BASE_URL host must be loopback (127.0.0.1, localhost, or ::1) or listed in AIDR_OBS_JEV_HOSTS"
+        )
     if parts.path not in ("", "/"):
         raise ReviewError("JEV_BASE_URL must not include a path")
     return base

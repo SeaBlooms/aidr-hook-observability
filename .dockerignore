@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.env
+.env.*
+.ruff_cache
+.pytest_cache
+.smoke
+**/__pycache__
+deploy
+docs
+scripts
+tests
+*.db
+*.jsonl
+*.log

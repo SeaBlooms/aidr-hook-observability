@@ -123,6 +123,18 @@ def test_non_loopback_base_refused(monkeypatch):
         jevreview.ask_jev({"verdict": "block", "reason": "x"})
 
 
+def test_jev_hosts_allowlist_names_only(monkeypatch):
+    monkeypatch.delenv("AIDR_OBS_JEV_HOSTS", raising=False)
+    with pytest.raises(jevreview.ReviewError, match="AIDR_OBS_JEV_HOSTS"):
+        jevreview.assert_loopback_base("http://jev:8790")
+    monkeypatch.setenv("AIDR_OBS_JEV_HOSTS", " Jev , 10.0.0.5,")
+    assert jevreview.assert_loopback_base("http://jev:8790") == "http://jev:8790"
+    with pytest.raises(jevreview.ReviewError):
+        jevreview.assert_loopback_base("http://10.0.0.5:8790")
+    with pytest.raises(jevreview.ReviewError):
+        jevreview.assert_loopback_base("http://other:8790")
+
+
 def test_load_env_file(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(

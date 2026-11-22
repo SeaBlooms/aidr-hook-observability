@@ -1,0 +1,46 @@
+# aidr-obs dashboard + Jev on a home server (vanishai). Both ports are published on the
+# server's loopback only; reach them from the Mac over SSH (mac/tunnel.plist.example).
+# Copy this file, backup.sh and server.env.example (as .env, chmod 600) into one folder
+# on the server (for example ~/aidr-stack), then: docker compose pull && docker compose up -d
+#
+# Each service gets only the variables it needs from .env: the AI Gateway key reaches Jev,
+# never the dashboard.
+
+services:
+  aidr-obs:
+    image: ${AIDR_OBS_IMAGE:-ghcr.io/seablooms/aidr-obs:latest}
+    container_name: aidr-obs
+    restart: unless-stopped
+    environment:
+      AIDR_OBS_PUSH_TOKEN: ${AIDR_OBS_PUSH_TOKEN:?set AIDR_OBS_PUSH_TOKEN in .env}
+      JEV_API_TOKEN: ${JEV_API_TOKEN:?set JEV_API_TOKEN in .env}
+      JEV_BASE_URL: http://jev:8790
+      AIDR_OBS_JEV_HOSTS: jev
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:8770:8770"
+    volumes:
+      - aidr-obs-data:/data
+    depends_on:
+      - jev
+
+  jev:
+    image: ${JEV_IMAGE:-ghcr.io/seablooms/jevai-dev-lab:latest}
+    container_name: jev
+    restart: unless-stopped
+    environment:
+      JEV_API_TOKEN: ${JEV_API_TOKEN:?set JEV_API_TOKEN in .env}
+      AI_GATEWAY_API_KEY: ${AI_GATEWAY_API_KEY:-}
+      JEV_MODEL: ${JEV_MODEL:-anthropic/claude-sonnet-5}
+      JEV_BACKEND: ${JEV_BACKEND:-gateway}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-300}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:8790:8790"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  aidr-obs-data:

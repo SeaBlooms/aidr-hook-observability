@@ -29,6 +29,13 @@ def main(argv=None) -> int:
     )
     prune = sub.add_parser("prune", help="drop captures and stored log lines older than N days")
     prune.add_argument("--days", type=int, required=True)
+    ship = sub.add_parser("ship", help="push captures and Noma logs to a remote aidr-obs serve")
+    ship.add_argument("action", choices=["run", "once", "install", "uninstall", "status"])
+    ship.add_argument(
+        "--from-end",
+        action="store_true",
+        help="treat everything already in the files as shipped (after migrating aidr.db to the server)",
+    )
     args = parser.parse_args(argv)
 
     if args.cmd == "ingest":
@@ -37,7 +44,11 @@ def main(argv=None) -> int:
         from . import jevreview, server
 
         jevreview.load_env_file()
-        server.serve(args.port, ingest_first=not args.no_ingest)
+        try:
+            server.serve(args.port, ingest_first=not args.no_ingest)
+        except ValueError as e:
+            print("not serving: " + str(e), file=sys.stderr)
+            return 1
     elif args.cmd == "tap":
         if args.action == "install":
             try:
@@ -49,6 +60,21 @@ def main(argv=None) -> int:
             _print(tapinstall.uninstall(args.agent))
         else:
             _print(tapinstall.status())
+    elif args.cmd == "ship":
+        from . import ship as shipper
+
+        try:
+            if args.action in ("run", "once"):
+                return shipper.run(from_end=args.from_end, once=args.action == "once")
+            if args.action == "install":
+                _print(shipper.install(from_end=args.from_end))
+            elif args.action == "uninstall":
+                _print(shipper.uninstall())
+            else:
+                _print(shipper.status())
+        except shipper.ShipError as e:
+            print("ship: " + str(e), file=sys.stderr)
+            return 1
     elif args.cmd == "prune":
         if args.days < 0:
             parser.error("--days must be >= 0")

@@ -1,8 +1,12 @@
 """Local dashboard server: static page + read-only JSON API, bound to 127.0.0.1 only.
 
+Inside a container (AIDR_OBS_CONTAINER=1) it may bind 0.0.0.0 so Docker can publish the
+port; publish it on the host's loopback only and reach it over SSH.
+
 Requests whose Host header isn't this loopback address are refused (DNS-rebinding
-guard), and the mutating endpoints (POST /api/ingest, POST /api/noise) also need a
-custom header, which a cross-site form can't send.
+guard), and the mutating endpoints (POST /api/ingest, POST /api/noise, POST /api/push*)
+also need a custom header, which a cross-site form can't send. /api/push* additionally
+needs the AIDR_OBS_PUSH_TOKEN bearer token.
 
 Static files under vendor/, js/ and css/ are served by exact relative name. The name is
 checked as path segments and then resolved back under that directory, so a request
@@ -10,6 +14,7 @@ cannot climb out of it. Scripts are only loaded from this origin (script-src 'se
 """
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -17,10 +22,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import graph, insights, jevreview, logparse, noise, paths, store, tapinstall
+from . import graph, insights, jevreview, logparse, noise, paths, push, store, tapinstall
 
 STATIC = Path(__file__).with_name("static")
 HOST = "127.0.0.1"
+CONTAINER_BIND = "0.0.0.0"
 VERDICT_ACTIONS = ("block", "ask", "mask", "context", "other")
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"
@@ -619,13 +625,39 @@ def _age_ms(ts_ms: int | None) -> int | None:
     return max(0, int(time.time() * 1000) - int(ts_ms))
 
 
+def _remote_status(conn: sqlite3.Connection) -> tuple[dict, dict]:
+    """Tap status as last reported by the Mac shipper, plus a check for how fresh that report is."""
+    beat = push.latest_heartbeat(conn)
+    if beat is None:
+        status = {"error": "no heartbeat from the Mac shipper yet", "claude-code": {}, "cursor": {}}
+        return status, {
+            "id": "shipper",
+            "ok": False,
+            "label": "Mac shipper",
+            "detail": "Run aidr-obs ship install on the Mac",
+        }
+    age = _age_ms(beat["received_ms"])
+    fresh = age is not None and age < 120_000
+    return beat["status"], {
+        "id": "shipper",
+        "ok": fresh,
+        "label": "Mac shipper",
+        "detail": ("reporting from " if fresh else "no recent heartbeat from ") + beat["device"],
+        "age_ms": age,
+    }
+
+
 def setup_status(conn: sqlite3.Connection, q: dict) -> dict:
     del q
-    try:
-        status = tapinstall.status()
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        status = {"error": str(exc), "claude-code": {}, "cursor": {}}
     checks = []
+    if push.remote_mode():
+        status, shipper_check = _remote_status(conn)
+        checks.append(shipper_check)
+    else:
+        try:
+            status = tapinstall.status()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            status = {"error": str(exc), "claude-code": {}, "cursor": {}}
     for agent, label in (("claude-code", "Claude Code"), ("cursor", "Cursor")):
         info = status.get(agent) or {}
         events = info.get("tap_events") or []
@@ -853,6 +885,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if path == "/api/event/review":
             return self._post_review()
+        if path in ("/api/push", "/api/push/heartbeat"):
+            return self._post_push(path)
         if path == "/api/noise":
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -900,18 +934,61 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _post_push(self, path: str) -> None:
+        try:
+            push.check_auth(self.headers.get("Authorization"))
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError as exc:
+                raise push.PushError("bad Content-Length") from exc
+            if length < 0 or length > push.MAX_BODY_BYTES:
+                raise push.PushError("body too large", 413)
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8") if length else "{}")
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise push.PushError("body must be JSON") from exc
+            if not isinstance(body, dict):
+                raise push.PushError("body must be a JSON object")
+            conn = store.connect()
+            try:
+                if path == "/api/push/heartbeat":
+                    return self._json(push.heartbeat(conn, body))
+                out = push.accept(conn, body)
+                if out["accepted_bytes"]:
+                    out["ingest"] = store.ingest(conn)
+                return self._json(out)
+            finally:
+                conn.close()
+        except push.PushError as e:
+            return self._json({"error": str(e), **e.extra}, e.status)
+
+
+def bind_host() -> str:
+    """AIDR_OBS_HOST, default 127.0.0.1. 0.0.0.0 only with AIDR_OBS_CONTAINER=1; nothing else."""
+    host = (os.environ.get("AIDR_OBS_HOST") or HOST).strip() or HOST
+    if host in (HOST, "localhost"):
+        return host
+    if host == CONTAINER_BIND and os.environ.get("AIDR_OBS_CONTAINER", "").strip() == "1":
+        return host
+    raise ValueError(
+        f"AIDR_OBS_HOST={host!r} is not allowed: use 127.0.0.1 ({CONTAINER_BIND} needs AIDR_OBS_CONTAINER=1)"
+    )
+
 
 def make_server(port: int) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((HOST, port), Handler)
+    return ThreadingHTTPServer((bind_host(), port), Handler)
 
 
 def serve(port: int = 8770, ingest_first: bool = True) -> None:
+    httpd = make_server(port)
     if ingest_first:
         conn = store.connect()
         print("ingest:", json.dumps(store.ingest(conn)))
         conn.close()
-    httpd = make_server(port)
-    print("aidr-obs serving http://" + HOST + ":" + str(httpd.server_address[1]) + "/ (Ctrl-C to stop)")
+    where = "http://" + HOST + ":" + str(httpd.server_address[1]) + "/"
+    if httpd.server_address[0] != HOST:
+        where += " (bound to " + httpd.server_address[0] + " in a container)"
+    print("aidr-obs serving " + where + " (Ctrl-C to stop)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
