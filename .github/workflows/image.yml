@@ -63,7 +63,7 @@ jobs:
         run: |
           docker buildx build --load -t obs-smoke .
           docker run -d --name obs -e AIDR_OBS_PUSH_TOKEN=ci -p 127.0.0.1:8770:8770 obs-smoke
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8770/api/setup && break; sleep 1; done
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8770/health && break; sleep 1; done
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Aidr-Obs: 1' http://127.0.0.1:8770/api/push)" = 401
           line='{"id":"ci1","ts":"2026-01-01T00:00:00.000","ts_ms":1767225600000,"agent":"claude-code","event":"PreToolUse","stdout":"{\"decision\":\"block\",\"reason\":\"ci\"}"}'
           data=$(printf '%s\n' "$line" | base64 -w0)

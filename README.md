@@ -202,13 +202,18 @@ runbook, and `deploy/docker-compose.yml` wires the two together.
 - The tap and the Noma hooks keep writing files on the Mac and stay offline. A separate process,
   `aidr-obs ship`, pushes the new lines to the server every 15 seconds and sends a heartbeat with
   `tap status`, so the Setup and Health views still show the Mac's tap.
-- Both container ports are published on the server's loopback only. The Mac reaches them through
-  an SSH tunnel (`deploy/mac/tunnel.plist.example`), so the dashboard still opens at
-  `http://127.0.0.1:8770/`. The shipper refuses plain http to anything but loopback.
+- Jev is published on the server's loopback only. The dashboard defaults to loopback too, and
+  the Mac shipper reaches it through an SSH tunnel (`deploy/mac/tunnel.plist.example`) because
+  it refuses plain http to anything but loopback. Set `AIDR_OBS_BIND=0.0.0.0` and
+  `AIDR_OBS_ALLOWED_HOSTS` (the browser's Host name) to serve the UI on the LAN, and set
+  `AIDR_OBS_UI_PASSWORD` or the server will not start. Any other Host is refused.
 - Pushes need `X-Aidr-Obs: 1` and the bearer token `AIDR_OBS_PUSH_TOKEN`. Each stream keeps the
   Mac file's identity and byte offset, so a retry or lost reply never duplicates or skips lines
   (the server answers `409 {expected}` and the shipper resumes from there).
-- Streams are not namespaced per device: ship from one Mac only.
+- Each Mac is its own device. The shipper sends its host name on every push, and the
+  server keeps that Mac's byte offset and spool under `devices/<device>/`. A second Mac
+  does not continue the first Mac's offset. Set `AIDR_OBS_SHIP_DEVICE` when two Macs
+  would otherwise share a host name. Health shows one shipper row per Mac.
 
 ```bash
 cp deploy/mac/ship.env.example ~/.aidr-obs/ship.env && chmod 600 ~/.aidr-obs/ship.env  # set the token
@@ -272,9 +277,14 @@ The UI is a single static page over a JSON API on the same loopback port. Every 
 | `POST /api/event/review` | ask Jev for a second opinion (`capture_id`, optional `force`, optional `backend`: `gateway` or `ollama`, else Jev's default); needs `X-Aidr-Obs: 1` and `JEV_API_TOKEN` |
 | `POST /api/push` | append whole lines to a stream (`stream`, `file_key`, `offset`, `data_b64`), then ingest; needs `X-Aidr-Obs: 1` and `Authorization: Bearer $AIDR_OBS_PUSH_TOKEN`; `409 {expected}` on an offset mismatch |
 | `POST /api/push/heartbeat` | the shipper's `{device, status}`; same headers |
+| `GET /health` | `{"ok": true}`, open without the session cookie |
+| `POST /login` | form field `password`; sets the session cookie. `POST /logout` clears it |
 
-Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which blocks
-DNS rebinding. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).
+Requests whose `Host` isn't `127.0.0.1:<port>`, `localhost:<port>`, or a name in
+`AIDR_OBS_ALLOWED_HOSTS` are refused, which blocks DNS rebinding. When
+`AIDR_OBS_UI_PASSWORD` is set, the page and every `/api/*` route except the push
+endpoints need the session cookie from `POST /login`. `GET /health` stays open and
+returns only `{"ok": true}`. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).
 Styles may be inline, because bar widths are set on the element.
 
 ## Development

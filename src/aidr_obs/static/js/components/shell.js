@@ -31,6 +31,12 @@ const MODE_TITLE = {
   unknown: "No captures in this range yet.",
 };
 
+function logout() {
+  fetch("/logout", { method: "POST" }).finally(() => {
+    location.assign("/");
+  });
+}
+
 const seenAlerts = new Set();
 let alertsPrimed = false;
 
@@ -141,6 +147,7 @@ export class Shell extends Component {
         <button class="btn" type="button" onClick=${() => this.refresh()} disabled=${this.state.refreshing}>Refresh</button>
         <button class="btn icon-btn" type="button" aria-label="Theme" title="Theme"
           onClick=${() => setTheme(app.theme === "auto" ? "light" : app.theme === "light" ? "dark" : "auto")}>${app.theme === "light" ? "Light" : app.theme === "dark" ? "Dark" : "Auto"}</button>
+        <button class="btn" type="button" onClick=${() => logout()}>Log out</button>
       </header>
       <nav class="sidebar ${app.navOpen ? "open" : ""}" aria-label="Sections">
         ${GROUPS.map(

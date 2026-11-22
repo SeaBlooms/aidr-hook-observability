@@ -97,13 +97,6 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     updated_ms INTEGER NOT NULL
 );
 
--- Remote mode (`aidr-obs ship`): the Mac file and byte offset last accepted per stream.
-CREATE TABLE IF NOT EXISTS push_state (
-    stream TEXT PRIMARY KEY,
-    file_key TEXT NOT NULL,
-    offset INTEGER NOT NULL,
-    updated_ms INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS push_heartbeat (
     device TEXT PRIMARY KEY,
     status_json TEXT NOT NULL,
@@ -134,9 +127,14 @@ def connect(db_file: Path | None = None) -> sqlite3.Connection:
     db_file = db_file or paths.db_path()
     paths.ensure_private_dir(db_file.parent)
     new = not db_file.exists()
-    conn = sqlite3.connect(db_file)
+    # Several Macs push while the UI ingests. Wait for the writer instead of failing
+    # the request, and let readers proceed during that write.
+    conn = sqlite3.connect(db_file, timeout=20)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=20000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate_push_state(conn)
     _migrate_jev_reviews(conn)
     if new:
         try:
@@ -144,6 +142,38 @@ def connect(db_file: Path | None = None) -> sqlite3.Connection:
         except OSError:
             pass
     return conn
+
+
+PUSH_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS push_state (
+    device TEXT NOT NULL DEFAULT '',
+    stream TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    offset INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    PRIMARY KEY (device, stream)
+);
+"""
+
+
+def _migrate_push_state(conn: sqlite3.Connection) -> None:
+    """Key the shipper offset by Mac as well as stream.
+
+    A table from before that change has no device column. Its rows stay, under an empty
+    device, so a new Mac does not inherit another Mac's byte offset.
+    """
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(push_state)")]
+    if cols and "device" not in cols:
+        with conn:
+            conn.execute("ALTER TABLE push_state RENAME TO push_state_v1")
+    conn.executescript(PUSH_STATE_SCHEMA)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_state_v1'").fetchone():
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO push_state (device, stream, file_key, offset, updated_ms)"
+                " SELECT '', stream, file_key, offset, updated_ms FROM push_state_v1"
+            )
+            conn.execute("DROP TABLE push_state_v1")
 
 
 def _migrate_jev_reviews(conn: sqlite3.Connection) -> None:
@@ -199,9 +229,28 @@ def _line_id(agent: str, raw: str, occurrence: int) -> str:
     return hashlib.sha256((agent + "\0" + raw + "\0" + str(occurrence)).encode()).hexdigest()[:32]
 
 
-def ingest_logs(conn: sqlite3.Connection, log_dir: Path | None = None) -> int:
+def log_dirs(log_dir: Path | None = None, data_dir: Path | None = None) -> list[Path]:
+    """The legacy Noma log dir, plus one noma/ dir per Mac that ships to this server."""
+    found = [log_dir or paths.noma_log_dir()]
+    devices = (data_dir or paths.data_dir()) / "devices"
+    if devices.is_dir():
+        for child in sorted(devices.iterdir()):
+            noma = child / "noma"
+            if child.is_dir() and noma.is_dir():
+                found.append(noma)
+    return found
+
+
+def ingest_logs(conn: sqlite3.Connection, log_dir: Path | None = None, data_dir: Path | None = None) -> int:
     added = 0
-    for path, agent in logparse.discover_log_files(log_dir or paths.noma_log_dir()):
+    for directory in log_dirs(log_dir, data_dir):
+        added += _ingest_log_dir(conn, directory)
+    return added
+
+
+def _ingest_log_dir(conn: sqlite3.Connection, log_dir: Path) -> int:
+    added = 0
+    for path, agent in logparse.discover_log_files(log_dir):
         try:
             data = _read_new(conn, path)
         except OSError:
@@ -282,10 +331,21 @@ def rebuild_runs(conn: sqlite3.Connection) -> int:
     return total
 
 
-def capture_files(data_dir: Path | None = None) -> list[Path]:
-    base = paths.capture_path() if data_dir is None else data_dir / "capture.jsonl"
+def _capture_pair(base: Path) -> list[Path]:
     rotated = base.with_name(base.name + ".1")
-    return [p for p in (rotated, base) if p.is_file()]
+    return [path for path in (rotated, base) if path.is_file()]
+
+
+def capture_files(data_dir: Path | None = None) -> list[Path]:
+    """Legacy capture.jsonl plus one capture.jsonl per Mac under devices/."""
+    data_dir = data_dir or paths.data_dir()
+    found = _capture_pair(data_dir / "capture.jsonl")
+    devices = data_dir / "devices"
+    if devices.is_dir():
+        for child in sorted(devices.iterdir()):
+            if child.is_dir():
+                found.extend(_capture_pair(child / "capture.jsonl"))
+    return found
 
 
 def _capture_row(rec: dict) -> tuple:
@@ -374,7 +434,7 @@ def link_captures(conn: sqlite3.Connection) -> None:
 
 def ingest(conn: sqlite3.Connection, log_dir: Path | None = None, data_dir: Path | None = None) -> dict:
     with conn:
-        lines = ingest_logs(conn, log_dir)
+        lines = ingest_logs(conn, log_dir, data_dir)
         captures = ingest_captures(conn, data_dir)
         runs = rebuild_runs(conn)
         link_captures(conn)

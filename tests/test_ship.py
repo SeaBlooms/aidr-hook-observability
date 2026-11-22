@@ -46,6 +46,10 @@ def _captures():
     return store.connect().execute("SELECT COUNT(*) FROM captures").fetchone()[0]
 
 
+def _spool(env, *parts):
+    return env["home"].joinpath("devices", "test-mac", *parts)
+
+
 def test_ships_appended_lines_once(cfg, mac, env):
     cap = mac["data"] / "capture.jsonl"
     _append(cap, _line("a") + _line("b"))
@@ -56,7 +60,7 @@ def test_ships_appended_lines_once(cfg, mac, env):
     assert ship.ship_once(cfg, state, mac["data"], mac["logs"])["capture.jsonl"] == 0
     _append(cap, '"}\n' + _line("c"))
     ship.ship_once(cfg, state, mac["data"], mac["logs"])
-    assert (env["home"] / "capture.jsonl").read_bytes() == cap.read_bytes()
+    assert _spool(env, "capture.jsonl").read_bytes() == cap.read_bytes()
     assert _captures() == 4
 
 
@@ -66,8 +70,10 @@ def test_ships_noma_logs_but_not_rotated_names(cfg, mac, env):
     _append(mac["logs"] / "cursor-guardrails-debug.log.1", "old\n")
     _append(mac["logs"] / "notes.txt", "private\n")
     ship.ship_once(cfg, {}, mac["data"], mac["logs"])
-    assert sorted(p.name for p in env["logs"].iterdir()) == ["cursor-guardrails-debug.log"]
-    assert (env["logs"] / "cursor-guardrails-debug.log").read_bytes() == log.read_bytes()
+    noma = _spool(env, "noma")
+    assert sorted(p.name for p in noma.iterdir()) == ["cursor-guardrails-debug.log"]
+    assert (noma / "cursor-guardrails-debug.log").read_bytes() == log.read_bytes()
+    assert list(env["logs"].iterdir()) == []
 
 
 def test_rotation_finishes_old_file_first(cfg, mac, env):
@@ -79,7 +85,7 @@ def test_rotation_finishes_old_file_first(cfg, mac, env):
     os.replace(cap, cap.with_name("capture.jsonl.1"))
     _append(cap, _line("c"))
     ship.ship_once(cfg, state, mac["data"], mac["logs"])
-    ids = [json.loads(x)["id"] for x in (env["home"] / "capture.jsonl").read_text().splitlines()]
+    ids = [json.loads(x)["id"] for x in _spool(env, "capture.jsonl").read_text().splitlines()]
     assert ids == ["a", "b", "c"] and _captures() == 3
 
 
@@ -101,7 +107,7 @@ def test_lost_state_resyncs_from_409(cfg, mac, env):
     state["capture.jsonl"]["offset"] = 0
     _append(cap, _line("c"))
     ship.ship_once(cfg, state, mac["data"], mac["logs"])
-    assert (env["home"] / "capture.jsonl").read_bytes() == cap.read_bytes() and _captures() == 3
+    assert _spool(env, "capture.jsonl").read_bytes() == cap.read_bytes() and _captures() == 3
 
 
 def test_state_file_is_private(cfg, mac, env):
@@ -140,6 +146,8 @@ def test_config_requires_token_and_loopback_http(env, monkeypatch):
     ship.env_path().write_text("AIDR_OBS_PUSH_TOKEN='from-file'\nAIDR_OBS_SHIP_DEVICE=mac-9\n", encoding="utf-8")
     cfg = ship.load_config()
     assert cfg["url"] == ship.DEFAULT_URL and cfg["token"] == "from-file" and cfg["device"] == "mac-9"
+    monkeypatch.setenv("AIDR_OBS_SHIP_DEVICE", "Other Mac")
+    assert ship.load_config()["device"] == "Other-Mac"
     monkeypatch.setenv("AIDR_OBS_PUSH_URL", "http://vanishai.example:8770")
     with pytest.raises(ship.ShipError, match="loopback"):
         ship.load_config()
