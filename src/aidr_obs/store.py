@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     updated_ms INTEGER NOT NULL
 );
 
+-- Remote mode (`aidr-obs ship`): the Mac file and byte offset last accepted per stream.
+CREATE TABLE IF NOT EXISTS push_state (
+    stream TEXT PRIMARY KEY,
+    file_key TEXT NOT NULL,
+    offset INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_heartbeat (
+    device TEXT PRIMARY KEY,
+    status_json TEXT NOT NULL,
+    received_ms INTEGER NOT NULL
+);
 """
 
 JEV_REVIEWS_SCHEMA = """

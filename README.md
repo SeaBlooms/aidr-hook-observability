@@ -1,7 +1,8 @@
 # aidr-hook-observability
 
-A local-only observability dashboard for AI-agent guardrail (AIDR) hooks in Claude Code
-and Cursor. It currently works with the [Noma](https://noma.security) guardrails hooks. It reads the hooks' debug logs and records what each hook
+A self-hosted observability dashboard for AI-agent guardrail (AIDR) hooks in Claude Code
+and Cursor. It runs on your Mac, or in a container on your own server (see
+[Running on a home server](#running-on-a-home-server)). It currently works with the [Noma](https://noma.security) guardrails hooks. It reads the hooks' debug logs and records what each hook
 received and what it decided, then shows it all on `http://127.0.0.1:8770/`.
 
 The dashboard binds to loopback, loads no CDN assets, and the capture tap makes no
@@ -192,6 +193,34 @@ What `tap install` changes:
   cached in `aidr.db`; it never changes what the hook relayed. The tap never sees
   the token and never calls Jev.
 
+## Running on a home server
+
+The dashboard and Jev can run as two containers on a server you own (`ghcr.io/seablooms/aidr-obs`
+and `ghcr.io/seablooms/jevai-dev-lab`). [`deploy/README-server.md`](deploy/README-server.md) is the
+runbook, and `deploy/docker-compose.yml` wires the two together.
+
+- The tap and the Noma hooks keep writing files on the Mac and stay offline. A separate process,
+  `aidr-obs ship`, pushes the new lines to the server every 15 seconds and sends a heartbeat with
+  `tap status`, so the Setup and Health views still show the Mac's tap.
+- Both container ports are published on the server's loopback only. The Mac reaches them through
+  an SSH tunnel (`deploy/mac/tunnel.plist.example`), so the dashboard still opens at
+  `http://127.0.0.1:8770/`. The shipper refuses plain http to anything but loopback.
+- Pushes need `X-Aidr-Obs: 1` and the bearer token `AIDR_OBS_PUSH_TOKEN`. Each stream keeps the
+  Mac file's identity and byte offset, so a retry or lost reply never duplicates or skips lines
+  (the server answers `409 {expected}` and the shipper resumes from there).
+- Streams are not namespaced per device: ship from one Mac only.
+
+```bash
+cp deploy/mac/ship.env.example ~/.aidr-obs/ship.env && chmod 600 ~/.aidr-obs/ship.env  # set the token
+uv run aidr-obs ship once                  # one pass
+uv run aidr-obs ship install --from-end    # LaunchAgent; --from-end after copying aidr.db to the server
+uv run aidr-obs ship status                # or: ship uninstall
+```
+
+Container-only settings: `AIDR_OBS_CONTAINER=1` allows `AIDR_OBS_HOST=0.0.0.0` (anything else is
+refused), `AIDR_OBS_REMOTE=1` reads tap status from the heartbeat, and `AIDR_OBS_JEV_HOSTS=jev`
+lets `JEV_BASE_URL` name the Jev container (host names only; IP literals are ignored).
+
 ## Uninstall and recovery
 
 ```bash
@@ -241,6 +270,8 @@ The UI is a single static page over a JSON API on the same loopback port. Every 
 | `POST /api/ingest` | load new data; needs header `X-Aidr-Obs: 1` |
 | `POST /api/noise` | replace the noise rules (`{"rules":[...]}`); same header |
 | `POST /api/event/review` | ask Jev for a second opinion (`capture_id`, optional `force`, optional `backend`: `gateway` or `ollama`, else Jev's default); needs `X-Aidr-Obs: 1` and `JEV_API_TOKEN` |
+| `POST /api/push` | append whole lines to a stream (`stream`, `file_key`, `offset`, `data_b64`), then ingest; needs `X-Aidr-Obs: 1` and `Authorization: Bearer $AIDR_OBS_PUSH_TOKEN`; `409 {expected}` on an offset mismatch |
+| `POST /api/push/heartbeat` | the shipper's `{device, status}`; same headers |
 
 Requests whose `Host` isn't `127.0.0.1:<port>` or `localhost:<port>` are refused, which blocks
 DNS rebinding. Responses send `Content-Security-Policy: script-src 'self'` (no inline scripts).

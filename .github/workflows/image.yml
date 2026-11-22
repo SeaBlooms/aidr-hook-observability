@@ -1,0 +1,74 @@
+name: Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - .github/workflows/image.yml
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/seablooms/aidr-obs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern=v{{version}}
+
+      # Pull requests only check that the image builds; main and tags publish it.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        if: github.event_name == 'pull_request'
+        run: |
+          docker buildx build --load -t obs-smoke .
+          docker run -d --name obs -e AIDR_OBS_PUSH_TOKEN=ci -p 127.0.0.1:8770:8770 obs-smoke
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8770/api/setup && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Aidr-Obs: 1' http://127.0.0.1:8770/api/push)" = 401
+          line='{"id":"ci1","ts":"2026-01-01T00:00:00.000","ts_ms":1767225600000,"agent":"claude-code","event":"PreToolUse","stdout":"{\"decision\":\"block\",\"reason\":\"ci\"}"}'
+          data=$(printf '%s\n' "$line" | base64 -w0)
+          curl -fsS -X POST -H 'X-Aidr-Obs: 1' -H 'Authorization: Bearer ci' -H 'Content-Type: application/json' \
+            -d "{\"stream\":\"capture.jsonl\",\"file_key\":\"ci\",\"offset\":0,\"data_b64\":\"$data\"}" \
+            http://127.0.0.1:8770/api/push
+          curl -fsS 'http://127.0.0.1:8770/api/verdicts?since=0' | grep -q '"ci1"'
+          docker logs obs
