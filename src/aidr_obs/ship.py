@@ -11,7 +11,8 @@ Offsets are kept per stream with the identity of the file they belong to, so a r
 Config: ~/.aidr-obs/ship.env (mode 600) or the environment, which wins.
   AIDR_OBS_PUSH_URL    default http://127.0.0.1:8770 (the SSH tunnel to the server)
   AIDR_OBS_PUSH_TOKEN  required; same value as the server's
-  AIDR_OBS_SHIP_DEVICE default: this host name
+  AIDR_OBS_SHIP_DEVICE default: this host name. Sent on every push so each Mac
+                       keeps its own offset on the server.
 Plain http is allowed only to loopback, so captures never cross the network unencrypted;
 use the tunnel, or https.
 """
@@ -20,6 +21,7 @@ import base64
 import json
 import os
 import plistlib
+import re
 import socket
 import subprocess
 import sys
@@ -77,6 +79,12 @@ def read_env_file(path: Path) -> dict:
     return out
 
 
+def device_name(raw: str) -> str:
+    """A host name the server will accept as one path segment."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", (raw or "").strip())[:100].strip(".-")
+    return name or "mac"
+
+
 def load_config() -> dict:
     file_env = read_env_file(env_path())
 
@@ -92,7 +100,7 @@ def load_config() -> dict:
         raise ShipError("AIDR_OBS_PUSH_URL must be an http(s) URL")
     if parts.scheme == "http" and parts.hostname.lower() not in _LOOPBACK:
         raise ShipError("plain http is only allowed to loopback; use the SSH tunnel or https")
-    return {"url": url, "token": tok, "device": get("AIDR_OBS_SHIP_DEVICE", socket.gethostname())}
+    return {"url": url, "token": tok, "device": device_name(get("AIDR_OBS_SHIP_DEVICE", socket.gethostname()))}
 
 
 def file_key(path: Path) -> str:
@@ -180,6 +188,7 @@ def _send_file(cfg: dict, stream: str, path: Path, entry: dict, state: dict) -> 
             "/api/push",
             {
                 "stream": stream,
+                "device": cfg["device"],
                 "file_key": entry["file_key"],
                 "offset": entry["offset"],
                 "data_b64": base64.b64encode(data).decode("ascii"),

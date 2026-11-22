@@ -1,23 +1,32 @@
-"""Local dashboard server: static page + read-only JSON API, bound to 127.0.0.1 only.
+"""Dashboard server: static page + read-only JSON API.
 
-Inside a container (AIDR_OBS_CONTAINER=1) it may bind 0.0.0.0 so Docker can publish the
-port; publish it on the host's loopback only and reach it over SSH.
+The process binds 127.0.0.1 unless AIDR_OBS_CONTAINER=1, in which case it may bind
+0.0.0.0 so Docker can publish the port. Publish that port on the host's loopback, or on
+the LAN (AIDR_OBS_BIND=0.0.0.0) the way the Kaizen hub is published.
 
-Requests whose Host header isn't this loopback address are refused (DNS-rebinding
-guard), and the mutating endpoints (POST /api/ingest, POST /api/noise, POST /api/push*)
-also need a custom header, which a cross-site form can't send. /api/push* additionally
-needs the AIDR_OBS_PUSH_TOKEN bearer token.
+Requests are refused unless the Host header is 127.0.0.1:<port>, localhost:<port>, or a
+name listed in AIDR_OBS_ALLOWED_HOSTS (DNS-rebinding guard). When AIDR_OBS_UI_PASSWORD is
+set, pages and /api/* need the session cookie from POST /login. POST /api/push* does not:
+it keeps the bearer token. GET /health stays open and returns only {"ok": true}.
+
+The mutating endpoints (POST /api/ingest, POST /api/noise, POST /api/push*) also need a
+custom header, which a cross-site form can't send. POST /login and POST /logout do not.
 
 Static files under vendor/, js/ and css/ are served by exact relative name. The name is
 checked as path segments and then resolved back under that directory, so a request
 cannot climb out of it. Scripts are only loaded from this origin (script-src 'self').
 """
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
+import threading
 import time
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -32,6 +41,13 @@ CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"
 )
 _PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_NEXT = re.compile(r"^/(#[A-Za-z0-9_?=&.%\-/]*)?\Z")
+SESSION_COOKIE = "aidr_obs_session"
+SESSION_SECONDS = 7 * 24 * 3600
+LOGIN_LOCK_AFTER = 8
+LOGIN_LOCK_SECONDS = 60
+_LOGIN_FAILS: dict[str, tuple[int, float]] = {}
+_LOGIN_LOCK = threading.Lock()
 _STATIC_KINDS = {
     "vendor": (STATIC / "vendor", {".js"}),
     "js": (STATIC / "js", {".js"}),
@@ -625,21 +641,11 @@ def _age_ms(ts_ms: int | None) -> int | None:
     return max(0, int(time.time() * 1000) - int(ts_ms))
 
 
-def _remote_status(conn: sqlite3.Connection) -> tuple[dict, dict]:
-    """Tap status as last reported by the Mac shipper, plus a check for how fresh that report is."""
-    beat = push.latest_heartbeat(conn)
-    if beat is None:
-        status = {"error": "no heartbeat from the Mac shipper yet", "claude-code": {}, "cursor": {}}
-        return status, {
-            "id": "shipper",
-            "ok": False,
-            "label": "Mac shipper",
-            "detail": "Run aidr-obs ship install on the Mac",
-        }
+def _shipper_check(beat: dict, check_id: str) -> dict:
     age = _age_ms(beat["received_ms"])
     fresh = age is not None and age < 120_000
-    return beat["status"], {
-        "id": "shipper",
+    return {
+        "id": check_id,
         "ok": fresh,
         "label": "Mac shipper",
         "detail": ("reporting from " if fresh else "no recent heartbeat from ") + beat["device"],
@@ -647,12 +653,40 @@ def _remote_status(conn: sqlite3.Connection) -> tuple[dict, dict]:
     }
 
 
+def _remote_status(conn: sqlite3.Connection) -> tuple[dict, list[dict]]:
+    """Tap status last reported by the shippers, plus one freshness check per Mac.
+
+    One Mac keeps the check id ``shipper``. Several Macs each get ``shipper:<device>``.
+    """
+    beats = push.heartbeats(conn)
+    if not beats:
+        status = {"error": "no heartbeat from the Mac shipper yet", "claude-code": {}, "cursor": {}}
+        return status, [
+            {
+                "id": "shipper",
+                "ok": False,
+                "label": "Mac shipper",
+                "detail": "Run aidr-obs ship install on the Mac",
+            }
+        ]
+    if len(beats) == 1:
+        return beats[0]["status"], [_shipper_check(beats[0], "shipper")]
+    merged: dict = {"claude-code": {}, "cursor": {}}
+    for beat in reversed(beats):
+        reported = beat["status"] or {}
+        for agent in ("claude-code", "cursor"):
+            info = reported.get(agent) or {}
+            if info:
+                merged[agent] = info
+    return merged, [_shipper_check(beat, "shipper:" + beat["device"]) for beat in beats]
+
+
 def setup_status(conn: sqlite3.Connection, q: dict) -> dict:
     del q
     checks = []
     if push.remote_mode():
-        status, shipper_check = _remote_status(conn)
-        checks.append(shipper_check)
+        status, shipper_checks = _remote_status(conn)
+        checks.extend(shipper_checks)
     else:
         try:
             status = tapinstall.status()
@@ -756,6 +790,16 @@ def _watch_snapshot() -> tuple:
     if log_dir.is_dir():
         files = sorted(log_dir.glob("*.log")) + sorted(log_dir.glob("*.log.*"))
         points.extend(stat(path) for path in files)
+    devices = paths.data_dir() / "devices"
+    if devices.is_dir():
+        for child in sorted(devices.iterdir()):
+            if not child.is_dir():
+                continue
+            points.append(stat(child / "capture.jsonl"))
+            noma = child / "noma"
+            if noma.is_dir():
+                files = sorted(noma.glob("*.log")) + sorted(noma.glob("*.log.*"))
+                points.extend(stat(path) for path in files)
     return tuple(points)
 
 
@@ -787,21 +831,73 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _host_ok(self) -> bool:
-        port = self.server.server_address[1]
-        return self.headers.get("Host", "") in (HOST + ":" + str(port), "localhost:" + str(port))
+        return host_allowed(self.headers.get("Host", ""), self.server.server_address[1])
 
-    def _base_headers(self, code: int, ctype: str) -> None:
+    def _base_headers(self, code: int, ctype: str, csp: str | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Content-Security-Policy", csp or CSP)
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
-        self._base_headers(code, ctype)
+    def _send(self, code: int, body: bytes, ctype: str, csp: str | None = None, set_cookie: str | None = None) -> None:
+        self._base_headers(code, ctype, csp)
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location: str, set_cookie: str | None = None) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
+        self.end_headers()
+
+    def _session_ok(self) -> bool:
+        return session_valid(self.headers.get("Cookie"))
+
+    def _login_page(self, message: str = "", nxt: str = "/", code: int = 200) -> None:
+        nonce = secrets.token_urlsafe(16)
+        csp = CSP.replace("script-src 'self'", "script-src 'nonce-" + nonce + "'")
+        self._send(code, login_html(message, safe_next(nxt), nonce), "text/html; charset=utf-8", csp=csp)
+
+    def _read_form(self, limit: int = 8_000) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return {}
+        if length < 0 or length > limit:
+            return {}
+        raw = self.rfile.read(length) if length else b""
+        try:
+            parsed = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        except UnicodeError:
+            return {}
+        return {key: values[0] if values else "" for key, values in parsed.items()}
+
+    def _post_login(self) -> None:
+        if not auth_required():
+            return self._redirect("/")
+        addr = self.client_address[0]
+        form = self._read_form()
+        nxt = safe_next(form.get("next", "/"))
+        if login_blocked(addr):
+            return self._login_page("Try again in a minute.", nxt, 429)
+        if not password_matches(form.get("password", "")):
+            note_login_failure(addr)
+            code = 429 if login_blocked(addr) else 401
+            message = "Try again in a minute." if code == 429 else "Wrong password."
+            return self._login_page(message, nxt, code)
+        note_login_success(addr)
+        expiry = int(time.time()) + SESSION_SECONDS
+        return self._redirect(nxt, cookie_header(session_token(expiry)))
+
+    def _post_logout(self) -> None:
+        return self._redirect("/", cookie_header(None))
 
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj, default=str).encode(), "application/json")
@@ -854,6 +950,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._send(403, b"forbidden", "text/plain")
         url = urlsplit(self.path)
+        if url.path == "/health":
+            return self._json({"ok": True})
+        if url.path == "/login":
+            if self._session_ok():
+                return self._redirect("/")
+            return self._login_page()
+        if not self._session_ok():
+            if url.path.startswith("/api/"):
+                return self._json({"error": "sign in required"}, 401)
+            if url.path in ("/", "/index.html"):
+                return self._login_page()
+            return self._send(401, b"sign in required", "text/plain")
         if url.path in ("/", "/index.html"):
             return self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
         if url.path == "/api/stream":
@@ -873,9 +981,21 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
     def do_POST(self):
-        if not self._host_ok() or self.headers.get("X-Aidr-Obs") != "1":
+        if not self._host_ok():
             return self._send(403, b"forbidden", "text/plain")
         path = urlsplit(self.path).path
+        if path == "/login":
+            return self._post_login()
+        if path == "/logout":
+            return self._post_logout()
+        if path in ("/api/push", "/api/push/heartbeat"):
+            if self.headers.get("X-Aidr-Obs") != "1":
+                return self._send(403, b"forbidden", "text/plain")
+            return self._post_push(path)
+        if not self._session_ok():
+            return self._json({"error": "sign in required"}, 401)
+        if self.headers.get("X-Aidr-Obs") != "1":
+            return self._send(403, b"forbidden", "text/plain")
         if path == "/api/ingest":
             conn = store.connect()
             try:
@@ -961,6 +1081,156 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
         except push.PushError as e:
             return self._json({"error": str(e), **e.extra}, e.status)
+        except sqlite3.OperationalError:
+            return self._json({"error": "database is busy, retry"}, 503)
+
+
+def allowed_host_names() -> frozenset[str]:
+    """Host names from AIDR_OBS_ALLOWED_HOSTS. A trailing port is stripped; the listening port is what is checked."""
+    names = set()
+    for raw in (os.environ.get("AIDR_OBS_ALLOWED_HOSTS") or "").split(","):
+        name = raw.strip().lower().rstrip(".")
+        if not name or "/" in name or " " in name:
+            continue
+        host, sep, port = name.rpartition(":")
+        if sep and port.isdigit():
+            name = host
+        if name:
+            names.add(name)
+    return frozenset(names)
+
+
+def host_allowed(host_header: str, port: int) -> bool:
+    """True for loopback, or for a name in AIDR_OBS_ALLOWED_HOSTS, on this server's port."""
+    given = (host_header or "").strip().lower()
+    port_s = str(port)
+    if given in (HOST + ":" + port_s, "localhost:" + port_s):
+        return True
+    return any(given == name + ":" + port_s for name in allowed_host_names())
+
+
+def ui_password() -> str:
+    return (os.environ.get("AIDR_OBS_UI_PASSWORD") or "").strip()
+
+
+def auth_required() -> bool:
+    return bool(ui_password())
+
+
+def check_auth_config() -> None:
+    """A LAN host allowlist with no password would publish the captures to the network."""
+    if allowed_host_names() and not ui_password():
+        raise ValueError("AIDR_OBS_ALLOWED_HOSTS is set but AIDR_OBS_UI_PASSWORD is empty")
+
+
+def password_matches(given: str) -> bool:
+    expected = ui_password()
+    return hmac.compare_digest(hashlib.sha256(given.encode()).digest(), hashlib.sha256(expected.encode()).digest())
+
+
+def session_token(expiry: int) -> str:
+    raw = str(expiry).encode()
+    mac = hmac.new(ui_password().encode(), raw, hashlib.sha256).hexdigest()
+    return str(expiry) + "." + mac
+
+
+def session_valid(cookie_header: str | None) -> bool:
+    if not auth_required():
+        return True
+    jar = SimpleCookie()
+    try:
+        jar.load(cookie_header or "")
+    except CookieError:
+        return False
+    morsel = jar.get(SESSION_COOKIE)
+    if morsel is None or "." not in morsel.value:
+        return False
+    expiry_s, _, mac = morsel.value.partition(".")
+    if not expiry_s.isdigit():
+        return False
+    if int(expiry_s) < int(time.time()):
+        return False
+    expected = hmac.new(ui_password().encode(), expiry_s.encode(), hashlib.sha256).hexdigest()
+    if len(mac) != len(expected):
+        return False
+    return hmac.compare_digest(mac, expected)
+
+
+def cookie_header(token: str | None) -> str:
+    if not token:
+        return SESSION_COOKIE + "=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+    return f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECONDS}"
+
+
+def safe_next(raw: str) -> str:
+    value = (raw or "").strip()
+    if _NEXT.fullmatch(value) and "\\" not in value and not value.startswith("//"):
+        return value
+    return "/"
+
+
+def login_blocked(addr: str) -> bool:
+    now = time.time()
+    with _LOGIN_LOCK:
+        count, until = _LOGIN_FAILS.get(addr, (0, 0.0))
+        if count >= LOGIN_LOCK_AFTER and now < until:
+            return True
+        if count >= LOGIN_LOCK_AFTER and now >= until:
+            _LOGIN_FAILS.pop(addr, None)
+        return False
+
+
+def note_login_failure(addr: str) -> None:
+    now = time.time()
+    with _LOGIN_LOCK:
+        count, until = _LOGIN_FAILS.get(addr, (0, 0.0))
+        if until and now >= until:
+            count = 0
+        count += 1
+        lock_until = now + LOGIN_LOCK_SECONDS if count >= LOGIN_LOCK_AFTER else 0.0
+        _LOGIN_FAILS[addr] = (count, lock_until)
+
+
+def note_login_success(addr: str) -> None:
+    with _LOGIN_LOCK:
+        _LOGIN_FAILS.pop(addr, None)
+
+
+def _esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def login_html(message: str, nxt: str, nonce: str) -> bytes:
+    page = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; background: #111; color: #eee;
+    display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  form { width: 18rem; display: grid; gap: 0.75rem; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0; }
+  input, button { font: inherit; padding: 0.5rem 0.6rem; }
+  .err { color: #f88; min-height: 1.2em; margin: 0; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+  <h1>AIDR Hook Observability</h1>
+  <p class="err">@@MESSAGE@@</p>
+  <label>Password <input type="password" name="password" autofocus required></label>
+  <input type="hidden" name="next" id="next" value="@@NEXT@@">
+  <button type="submit">Sign in</button>
+</form>
+<script nonce="@@NONCE@@">document.getElementById("next").value = "/" + location.hash</script>
+</body>
+</html>
+"""
+    return (
+        page.replace("@@MESSAGE@@", _esc(message)).replace("@@NEXT@@", _esc(nxt)).replace("@@NONCE@@", _esc(nonce))
+    ).encode()
 
 
 def bind_host() -> str:
@@ -980,6 +1250,7 @@ def make_server(port: int) -> ThreadingHTTPServer:
 
 
 def serve(port: int = 8770, ingest_first: bool = True) -> None:
+    check_auth_config()
     httpd = make_server(port)
     if ingest_first:
         conn = store.connect()

@@ -5,11 +5,11 @@ Two containers on the home server (`vanishai` below, the SSH alias), next to its
 - `aidr-obs`: the dashboard in remote mode (`AIDR_OBS_REMOTE=1`). It never reads the Mac. The Mac's shipper (`aidr-obs ship`) pushes new capture and Noma log lines to `POST /api/push` with a bearer token and sends a heartbeat with `tap status`, which feeds the Setup and Health views.
 - `jev`: the Jev review service from `jevai-dev-lab`, with both backends (AI Gateway and the host's Ollama at `host.docker.internal:11434`).
 
-Both ports are published on the server's `127.0.0.1` only. From the Mac you reach them through an SSH tunnel, so the dashboard still opens at `http://127.0.0.1:8770` and nothing is exposed on the LAN. The tap on the Mac is unchanged and stays offline: it only appends to `~/.aidr-obs/capture.jsonl`.
+Jev is published on the server's `127.0.0.1` only. The dashboard defaults to the same, and the Mac shipper reaches it through an SSH tunnel. To serve the UI on the LAN, set `AIDR_OBS_BIND=0.0.0.0` and `AIDR_OBS_ALLOWED_HOSTS` to the name the browser uses. The tap on the Mac is unchanged and stays offline: it only appends to `~/.aidr-obs/capture.jsonl`.
 
 ```
-Mac: tap -> capture.jsonl, ~/.noma/*.log -> aidr-obs ship -> ssh -L 8770 ─┐
-vanishai: 127.0.0.1:8770 aidr-obs ──http://jev:8790──> jev ──> Ollama (host) / AI Gateway
+Mac: tap -> capture.jsonl, ~/.noma/*.log -> aidr-obs ship -> ssh -L 8770 -> aidr-obs
+LAN browser -> http://<allowed-host>:8770 -> aidr-obs ──http://jev:8790──> jev ──> Ollama / AI Gateway
 ```
 
 ## One-time setup on the server
@@ -80,7 +80,7 @@ Then install the shipper with `--from-end` (below) so lines already in the datab
 
    ```bash
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.seablooms.aidr-obs.tunnel.plist
-   curl -fsS http://127.0.0.1:8770/api/setup
+   curl -fsS http://127.0.0.1:8770/health
    ```
 
 3. **Shipper.** Copy `deploy/mac/ship.env.example` to `~/.aidr-obs/ship.env`, `chmod 600` it, and set `AIDR_OBS_PUSH_TOKEN` to the server's value. From the repo checkout (the LaunchAgent runs this checkout's `.venv` Python, so keep it in place):
@@ -96,7 +96,16 @@ Then install the shipper with `--from-end` (below) so lines already in the datab
 
 4. **Jev on the Mac (optional).** A local `jev serve` is no longer needed. If you keep one, point its `OLLAMA_BASE_URL` at the server's Ollama (`http://<server>:11434/v1`).
 
-The streams are not namespaced per device: ship from one Mac only.
+## Another Mac
+
+The dashboard stays on this server. Another Mac only needs the tap, the tunnel, and the shipper. It does not run the dashboard or Jev.
+
+1. Clone this repo and leave the checkout where it is. `uv sync`, then `uv run aidr-obs tap install` (Noma hooks already installed, with `NOMA_DEBUG=1`).
+2. Add an SSH alias `vanishai` that logs in with a key and no prompt. Copy `deploy/mac/tunnel.plist.example` to `~/Library/LaunchAgents/` and bootstrap it, the same way as the first Mac. `curl -fsS http://127.0.0.1:8770/health` should print `{"ok":true}`.
+3. Copy `~/.aidr-obs/ship.env` from a Mac that already ships, or start from `deploy/mac/ship.env.example`. The push token is the server's `AIDR_OBS_PUSH_TOKEN`. `chmod 600` the file. Leave `AIDR_OBS_SHIP_DEVICE` unset unless this Mac's hostname matches another shipper; the server uses that name to keep each Mac's byte offset separate.
+4. From the checkout: `uv run aidr-obs ship install`. Omit `--from-end` so this Mac's existing capture and debug logs are pushed once. Use `--from-end` only when those lines are already in the server database and you do not want them sent again.
+
+Opening the UI on that Mac needs no install: the LAN URL and the shared password. The shipper still uses the tunnel, not the LAN URL.
 
 ## Updating
 
@@ -119,7 +128,7 @@ Copy backups off the box with `docker compose cp aidr-obs:/data/backups ./backup
 
 ## Security
 
-- Both ports listen on the server's loopback only; access is through SSH. There is no TLS on the containers, so do not publish them on the LAN or forward them.
-- The dashboard checks the `Host` header (`127.0.0.1:8770` or `localhost:8770`), which the tunnel preserves. Every push needs `X-Aidr-Obs: 1` and the bearer token; without `AIDR_OBS_PUSH_TOKEN` the push routes answer 403.
+- Jev listens on the server's loopback only. The dashboard does too, unless `AIDR_OBS_BIND=0.0.0.0`. There is no TLS and the UI has no login, so a LAN bind lets anyone on the LAN read captured prompts. Do not forward the port to the internet.
+- The dashboard checks the `Host` header (`127.0.0.1:8770`, `localhost:8770`, or a name in `AIDR_OBS_ALLOWED_HOSTS`). Set `AIDR_OBS_UI_PASSWORD` whenever that allowlist is non-empty: the server will not start without it, and the browser must sign in. The cookie is `HttpOnly` and `SameSite=Strict`. It is not marked `Secure`, because the LAN URL is plain HTTP. Every push needs `X-Aidr-Obs: 1` and the bearer token; without `AIDR_OBS_PUSH_TOKEN` the push routes answer 403. The shipper still uses the tunnel, because it refuses plain http off loopback.
 - The dashboard calls Jev only on loopback or on names in `AIDR_OBS_JEV_HOSTS` (here `jev`, the compose service); IP literals there are ignored.
 - Both containers run as UID 10001. `.env` holds the only secrets: keep it `chmod 600` and out of git.

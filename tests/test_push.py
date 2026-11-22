@@ -123,6 +123,42 @@ def test_new_file_key_starts_a_new_baseline(dash):
     assert status == 200 and data["offset"] == len(_line("b")) and _captures() == 2
 
 
+def test_two_devices_do_not_share_an_offset(dash, env):
+    a, b = _line("a"), _line("b")
+    first = {**_chunk("capture.jsonl", "same-key", 0, a), "device": "mac-a"}
+    second = {**_chunk("capture.jsonl", "same-key", 0, b), "device": "mac-b"}
+    assert _post(dash, "/api/push", first)[0] == 200
+    status, data = _post(dash, "/api/push", second)
+    assert status == 200 and data["offset"] == len(b) and data["device"] == "mac-b"
+    assert (env["home"] / "devices" / "mac-a" / "capture.jsonl").read_bytes() == a
+    assert (env["home"] / "devices" / "mac-b" / "capture.jsonl").read_bytes() == b
+    assert _captures() == 2
+
+
+def test_bad_device_name_refused(dash, env):
+    body = {**_chunk("capture.jsonl", "k", 0, _line("a")), "device": "../mac"}
+    assert _post(dash, "/api/push", body)[0] == 400
+    assert _captures() == 0 and not (env["home"] / "devices").exists()
+
+
+def test_old_push_state_keeps_its_offset(env):
+    import sqlite3
+
+    env["home"].mkdir(parents=True, exist_ok=True)
+    db = env["home"] / "aidr.db"
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "CREATE TABLE push_state (stream TEXT PRIMARY KEY, file_key TEXT NOT NULL,"
+        " offset INTEGER NOT NULL, updated_ms INTEGER NOT NULL)"
+    )
+    raw.execute("INSERT INTO push_state VALUES ('capture.jsonl', 'old-key', 42, 1)")
+    raw.commit()
+    raw.close()
+    conn = store.connect()
+    row = conn.execute("SELECT device, file_key, offset FROM push_state").fetchone()
+    assert row["device"] == "" and row["file_key"] == "old-key" and row["offset"] == 42
+
+
 def test_noma_log_stream_lands_in_log_dir(dash, env):
     raw = b"2026-06-29 14:23:01,050 DEBUG hello\n"
     status, _ = _post(dash, "/api/push", _chunk("cursor-guardrails-debug.log", "L", 0, raw))
@@ -187,6 +223,17 @@ def test_heartbeat_feeds_setup_in_remote_mode(dash, monkeypatch):
     assert checks["shipper"]["ok"] is True and "mac-1" in checks["shipper"]["detail"]
     assert checks["tap-claude-code"]["ok"] is True and checks["tap-cursor"]["ok"] is False
     assert checks["debug"]["ok"] is True
+
+
+def test_each_mac_gets_its_own_shipper_check(env, monkeypatch):
+    monkeypatch.setenv("AIDR_OBS_REMOTE", "1")
+    conn = store.connect()
+    push.heartbeat(conn, {"device": "mac-1", "status": {"claude-code": {"tap_events": ["PreToolUse"]}}})
+    push.heartbeat(conn, {"device": "mac-2", "status": {"cursor": {"tap_events": ["PreToolUse"]}}})
+    checks = _checks(conn)
+    assert "shipper" not in checks
+    assert checks["shipper:mac-1"]["ok"] is True and checks["shipper:mac-2"]["ok"] is True
+    assert checks["tap-claude-code"]["ok"] is True and checks["tap-cursor"]["ok"] is True
 
 
 def test_stale_heartbeat_reported(env, monkeypatch):

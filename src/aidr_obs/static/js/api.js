@@ -8,8 +8,13 @@ export function query(app, extra) {
   return params;
 }
 
+function bounceIfSignedOut(response) {
+  if (response.status === 401) location.assign("/");
+  return response;
+}
+
 export async function getJSON(path, app, extra) {
-  const response = await fetch(path + "?" + query(app, extra).toString());
+  const response = bounceIfSignedOut(await fetch(path + "?" + query(app, extra).toString()));
   if (!response.ok) {
     let detail = "";
     try {
@@ -24,6 +29,7 @@ export async function getJSON(path, app, extra) {
 
 export function ingest() {
   return fetch("/api/ingest", { method: "POST", headers: { "X-Aidr-Obs": "1" } }).then((response) => {
+    bounceIfSignedOut(response);
     if (!response.ok) throw new Error("Refresh failed (HTTP " + response.status + ")");
     return response.json();
   });
@@ -35,6 +41,7 @@ export function saveNoise(rules) {
     headers: { "X-Aidr-Obs": "1", "Content-Type": "application/json" },
     body: JSON.stringify({ rules }),
   }).then(async (response) => {
+    bounceIfSignedOut(response);
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not save the noise list");
     return body;
@@ -47,6 +54,7 @@ export function askJev(captureId, force, backend) {
     headers: { "X-Aidr-Obs": "1", "Content-Type": "application/json" },
     body: JSON.stringify({ capture_id: captureId, force: !!force, backend: backend || null }),
   }).then(async (response) => {
+    bounceIfSignedOut(response);
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Ask Jev failed (HTTP " + response.status + ")");
     return body;

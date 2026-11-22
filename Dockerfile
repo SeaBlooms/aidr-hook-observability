@@ -28,5 +28,5 @@ USER aidr
 VOLUME /data
 EXPOSE 8770
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8770/api/setup', timeout=4)" || exit 1
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8770/health', timeout=4)" || exit 1
 CMD ["aidr-obs", "serve", "--port", "8770"]

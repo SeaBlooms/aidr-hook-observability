@@ -1,5 +1,7 @@
-# aidr-obs dashboard + Jev on a home server (vanishai). Both ports are published on the
-# server's loopback only; reach them from the Mac over SSH (mac/tunnel.plist.example).
+# aidr-obs dashboard + Jev on a home server (vanishai). Jev stays on the server's loopback.
+# The dashboard defaults to loopback too; set AIDR_OBS_BIND=0.0.0.0 and AIDR_OBS_ALLOWED_HOSTS
+# to serve the UI on the LAN (same pattern as the Kaizen hub). The Mac shipper still uses
+# the SSH tunnel (mac/tunnel.plist.example), because it refuses plain http off loopback.
 # Copy this file, backup.sh and server.env.example (as .env, chmod 600) into one folder
 # on the server (for example ~/aidr-stack), then: docker compose pull && docker compose up -d
 #
@@ -16,9 +18,11 @@ services:
       JEV_API_TOKEN: ${JEV_API_TOKEN:?set JEV_API_TOKEN in .env}
       JEV_BASE_URL: http://jev:8790
       AIDR_OBS_JEV_HOSTS: jev
+      AIDR_OBS_ALLOWED_HOSTS: ${AIDR_OBS_ALLOWED_HOSTS:-}
+      AIDR_OBS_UI_PASSWORD: ${AIDR_OBS_UI_PASSWORD:-}
       TZ: ${TZ:-UTC}
     ports:
-      - "127.0.0.1:8770:8770"
+      - "${AIDR_OBS_BIND:-127.0.0.1}:8770:8770"
     volumes:
       - aidr-obs-data:/data
     depends_on:
