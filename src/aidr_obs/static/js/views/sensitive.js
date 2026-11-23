@@ -1,6 +1,6 @@
 import { getJSON } from "../api.js";
 import { DataTable } from "../components/table.js";
-import { Bars, LoadView, Verdict, When, html } from "../components/ui.js";
+import { Bars, LoadView, Verdict, When, deviceColumn, html } from "../components/ui.js";
 import { go, update } from "../state.js";
 
 export class Sensitive extends LoadView {
@@ -17,9 +17,9 @@ export class Sensitive extends LoadView {
         <section class="card"><h2>Agent autonomy</h2>
           <div class="stat">${data.unsandboxed_count}<small>Cursor commands outside the sandbox</small></div>
           ${(data.permission_modes || []).length
-            ? html`<table><thead><tr><th>Agent</th><th>Permission mode</th><th>Events</th></tr></thead>
+            ? html`<table><thead><tr><th>Device</th><th>Agent</th><th>Permission mode</th><th>Events</th></tr></thead>
                 <tbody>${data.permission_modes.map(
-                  (row) => html`<tr key=${row.agent + row.mode}><td>${row.agent}</td><td class=${row.mode === "bypassPermissions" ? "v-block" : ""}>${row.mode}</td><td>${row.events}</td></tr>`,
+                  (row) => html`<tr key=${(row.device || "") + row.agent + row.mode}><td>${row.device || "–"}</td><td>${row.agent}</td><td class=${row.mode === "bypassPermissions" ? "v-block" : ""}>${row.mode}</td><td>${row.events}</td></tr>`,
                 )}</tbody></table>`
             : null}
         </section>
@@ -37,6 +37,7 @@ export class Sensitive extends LoadView {
           columns=${[
             { id: "ts", label: "When", sortValue: (row) => Date.parse(row.ts) || 0, render: (row) => html`<${When} ts=${row.ts} />` },
             { id: "agent", label: "Agent", sortValue: (row) => row.agent },
+            deviceColumn(),
             { id: "tool", label: "Tool", sortValue: (row) => row.tool || "" },
             { id: "access", label: "Access", sortValue: (row) => row.access },
             { id: "labels", label: "Matched", sortValue: (row) => (row.labels || []).join(","), render: (row) => (row.labels || []).map((label) => html`<button class="tag warn" type="button" key=${label} onClick=${(event) => { event.stopPropagation(); go("graph", { focus: "sensitive:" + label }); }}>${label}</button>`) },
@@ -56,6 +57,7 @@ export class Sensitive extends LoadView {
           empty="None in this range"
           columns=${[
             { id: "ts", label: "When", sortValue: (row) => Date.parse(row.ts) || 0, render: (row) => html`<${When} ts=${row.ts} />` },
+            deviceColumn(),
             { id: "verdict", label: "Verdict", sortValue: (row) => row.verdict, render: (row) => html`<${Verdict} verdict=${row.verdict} mode=${mode} />` },
             { id: "summary", label: "Command", truncate: true, sortValue: (row) => row.summary || "", exportValue: (row) => row.summary || "", render: (row) => html`<code title=${row.summary || ""}>${row.summary || ""}</code>` },
           ]} />

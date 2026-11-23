@@ -59,6 +59,7 @@ class Action:
     text: str | None = None
     tokens: dict | None = None
     latency_ms: int | None = None
+    device: str = ""
 
 
 def _as_dict(value) -> dict:
@@ -104,7 +105,8 @@ def _tool_name(agent: str, event: str | None, stdin: dict, fallback: str | None)
 
 def _load_captures(conn: sqlite3.Connection, since: int, until: int | None = None) -> list[dict]:
     sql = (
-        "SELECT id, ts, ts_ms, agent, event, tool_name, session_id, verdict, reason, stdin_json, latency_ms"
+        "SELECT id, ts, ts_ms, agent, event, tool_name, session_id, verdict, reason, stdin_json, latency_ms,"
+        " COALESCE(device, '') AS device"
         " FROM captures WHERE ts_ms >= ?"
     )
     args: list = [since]
@@ -162,9 +164,10 @@ def load_actions(conn: sqlite3.Connection, since: int = 0, until: int | None = N
         agent, event = rec["agent"] or "?", rec["event"]
         session = rec["session_id"] or stdin.get("session_id") or stdin.get("conversation_id")
         turn = stdin.get("prompt_id") or stdin.get("generation_id")
+        device = rec.get("device") or ""
         if event in PROMPT_EVENTS or event in RESPONSE_EVENTS:
             kind = "prompt" if event in PROMPT_EVENTS else "response"
-            a = Action(agent, session, turn, rec["ts"], rec["ts_ms"], None, kind)
+            a = Action(agent, session, turn, rec["ts"], rec["ts_ms"], None, kind, device=device)
             _merge(a, rec)
             text = stdin.get("prompt") if kind == "prompt" else stdin.get("last_assistant_message", stdin.get("text"))
             a.text = text if isinstance(text, str) else None
@@ -175,12 +178,19 @@ def load_actions(conn: sqlite3.Connection, since: int = 0, until: int | None = N
                 }
             actions.append(a)
             continue
-        key = (agent, stdin.get("tool_use_id")) if stdin.get("tool_use_id") else None
+        key = (device, agent, stdin.get("tool_use_id")) if stdin.get("tool_use_id") else None
         if key and key in by_tool_use:
             _merge(by_tool_use[key], rec)
             continue
         a = Action(
-            agent, session, turn, rec["ts"], rec["ts_ms"], _tool_name(agent, event, stdin, rec["tool_name"]), "tool"
+            agent,
+            session,
+            turn,
+            rec["ts"],
+            rec["ts_ms"],
+            _tool_name(agent, event, stdin, rec["tool_name"]),
+            "tool",
+            device=device,
         )
         _merge(a, rec)
         if key:
@@ -195,6 +205,7 @@ def load_actions(conn: sqlite3.Connection, since: int = 0, until: int | None = N
                 a
                 for a in reversed(actions)
                 if a.agent == edit.agent
+                and a.device == edit.device
                 and a.turn == edit.turn
                 and a.file_path == edit.file_path
                 and a.tool in EDIT_TOOLS
@@ -304,11 +315,23 @@ def destinations(conn: sqlite3.Connection, since: int, until: int | None = None)
         for d in destinations_of(a):
             key = (d["kind"], d["target"])
             g = groups.setdefault(
-                key, {**d, "count": 0, "verdicts": {}, "agents": set(), "tools": set(), "first": a.ts, "examples": []}
+                key,
+                {
+                    **d,
+                    "count": 0,
+                    "verdicts": {},
+                    "agents": set(),
+                    "devices": set(),
+                    "tools": set(),
+                    "first": a.ts,
+                    "examples": [],
+                },
             )
             g["count"] += 1
             g["verdicts"][a.verdict] = g["verdicts"].get(a.verdict, 0) + 1
             g["agents"].add(a.agent)
+            if a.device:
+                g["devices"].add(a.device)
             if a.tool:
                 g["tools"].add(a.tool)
             g["last"] = a.ts
@@ -320,9 +343,13 @@ def destinations(conn: sqlite3.Connection, since: int, until: int | None = None)
                         "verdict": a.verdict,
                         "summary": _summary(a)[:300],
                         "capture_id": a.capture_ids[0],
+                        "device": a.device,
                     }
                 )
-    items = [{**g, "agents": sorted(g["agents"]), "tools": sorted(g["tools"])} for g in groups.values()]
+    items = [
+        {**g, "agents": sorted(g["agents"]), "devices": sorted(g["devices"]), "tools": sorted(g["tools"])}
+        for g in groups.values()
+    ]
     items.sort(key=lambda g: (-max((SEVERITY.get(v, 0) for v in g["verdicts"]), default=0), -g["count"]))
     by_class: dict[str, int] = {}
     for g in items:
@@ -374,13 +401,14 @@ def sensitive(conn: sqlite3.Connection, since: int, until: int | None = None) ->
     hits, unsandboxed, modes = [], [], {}
     for a in load_actions(conn, since, until):
         if a.permission_mode:
-            modes[(a.agent, a.permission_mode)] = modes.get((a.agent, a.permission_mode), 0) + 1
+            modes[(a.agent, a.device, a.permission_mode)] = modes.get((a.agent, a.device, a.permission_mode), 0) + 1
         if a.kind != "tool":
             continue
         labels = sensitive_hits(a)
         row = {
             "ts": a.ts,
             "agent": a.agent,
+            "device": a.device,
             "tool": a.tool,
             "access": _access(a),
             "verdict": a.verdict,
@@ -403,7 +431,8 @@ def sensitive(conn: sqlite3.Connection, since: int, until: int | None = None) ->
         "unsandboxed": list(reversed(unsandboxed))[:500],
         "unsandboxed_count": len(unsandboxed),
         "permission_modes": [
-            {"agent": k[0], "mode": k[1], "events": n} for k, n in sorted(modes.items(), key=lambda kv: -kv[1])
+            {"agent": k[0], "device": k[1], "mode": k[2], "events": n}
+            for k, n in sorted(modes.items(), key=lambda kv: -kv[1])
         ],
     }
 
@@ -412,7 +441,8 @@ def sensitive(conn: sqlite3.Connection, since: int, until: int | None = None) ->
 
 
 def _session_key(a: Action) -> str:
-    return a.agent + "|" + (a.session or "?")
+    key = a.agent + "|" + (a.session or "?")
+    return key + "|" + a.device if a.device else key
 
 
 def sessions(conn: sqlite3.Connection, since: int, until: int | None = None) -> dict:
@@ -424,6 +454,7 @@ def sessions(conn: sqlite3.Connection, since: int, until: int | None = None) -> 
             {
                 "key": key,
                 "agent": a.agent,
+                "device": a.device,
                 "session": a.session,
                 "first": a.ts,
                 "first_ms": a.ts_ms,
@@ -481,7 +512,13 @@ def session_detail(conn: sqlite3.Connection, key: str, since: int = 0) -> dict:
             t = {"turn": turn_key, "ts": a.ts, "prompt": None, "response": None, "tools": [], "tokens": None}
             by_turn[turn_key] = t
             turns.append(t)
-        item = {"ts": a.ts, "verdict": a.verdict, "reason": a.reason, "capture_id": a.capture_ids[0]}
+        item = {
+            "ts": a.ts,
+            "verdict": a.verdict,
+            "reason": a.reason,
+            "capture_id": a.capture_ids[0],
+            "device": a.device,
+        }
         if a.kind == "prompt":
             t["prompt"] = {**item, "text": (a.text or "")[:2000]}
         elif a.kind == "response":
@@ -527,6 +564,7 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
             a.model or "?",
             {
                 "model": a.model or "?",
+                "devices": set(),
                 "responses": 0,
                 "input_tokens": 0.0,
                 "output_tokens": 0.0,
@@ -534,6 +572,8 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
                 "cache_write_tokens": 0.0,
             },
         )
+        if a.device:
+            m["devices"].add(a.device)
         m["responses"] += 1
         for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
             m[k] += a.tokens.get(k) or 0
@@ -545,11 +585,12 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
     tools: dict[tuple, list] = {}
     for a in actions:
         if a.kind == "tool" and a.duration_ms is not None:
-            tools.setdefault((a.agent, a.tool or "?"), []).append(a.duration_ms)
+            tools.setdefault((a.device, a.agent, a.tool or "?"), []).append(a.duration_ms)
     tool_perf = [
         {
-            "agent": k[0],
-            "tool": k[1],
+            "device": k[0],
+            "agent": k[1],
+            "tool": k[2],
             "count": len(v),
             "p50": _pct(v, 0.5),
             "p95": _pct(v, 0.95),
@@ -563,11 +604,22 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
     hook_lat: dict[tuple, list] = {}
     lat_sql, lat_args = _between("ts_ms", since, until)
     for r in conn.execute(
-        "SELECT agent, event, latency_ms FROM captures WHERE " + lat_sql + " AND latency_ms IS NOT NULL", lat_args
+        "SELECT COALESCE(device, '') AS device, agent, event, latency_ms FROM captures WHERE "
+        + lat_sql
+        + " AND latency_ms IS NOT NULL",
+        lat_args,
     ):
-        hook_lat.setdefault((r["agent"], r["event"]), []).append(r["latency_ms"])
+        hook_lat.setdefault((r["device"], r["agent"], r["event"]), []).append(r["latency_ms"])
     hook_perf = [
-        {"agent": k[0], "event": k[1], "count": len(v), "p50": _pct(v, 0.5), "p95": _pct(v, 0.95), "max": max(v)}
+        {
+            "device": k[0],
+            "agent": k[1],
+            "event": k[2],
+            "count": len(v),
+            "p50": _pct(v, 0.5),
+            "p95": _pct(v, 0.95),
+            "max": max(v),
+        }
         for k, v in hook_lat.items()
     ]
     hook_perf.sort(key=lambda r: -(r["p95"] or 0))
@@ -579,6 +631,7 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
             {
                 "project": a.project or "?",
                 "agents": set(),
+                "devices": set(),
                 "sessions": set(),
                 "tool_calls": 0,
                 "prompts": 0,
@@ -587,6 +640,8 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
             },
         )
         p["agents"].add(a.agent)
+        if a.device:
+            p["devices"].add(a.device)
         if a.session:
             p["sessions"].add(a.agent + a.session)
         if a.kind == "tool":
@@ -601,13 +656,17 @@ def usage(conn: sqlite3.Connection, since: int, until: int | None = None) -> dic
             **p,
             "name": PurePosixPath(p["project"]).name or p["project"],
             "agents": sorted(p["agents"]),
+            "devices": sorted(p["devices"]),
             "sessions": len(p["sessions"]),
         }
         for p in projects.values()
     ]
     project_rows.sort(key=lambda p: -(p["tool_calls"] + p["prompts"]))
     return {
-        "tokens_by_model": sorted(by_model.values(), key=lambda m: -m["output_tokens"]),
+        "tokens_by_model": sorted(
+            ({**m, "devices": sorted(m["devices"])} for m in by_model.values()),
+            key=lambda m: -m["output_tokens"],
+        ),
         "token_series": [token_series[k] for k in sorted(token_series)],
         "redacted_token_responses": redacted_responses,
         "tool_perf": tool_perf,
@@ -655,6 +714,7 @@ def action_record(a: Action) -> dict:
         "ts": a.ts,
         "ts_ms": a.ts_ms,
         "agent": a.agent,
+        "device": a.device,
         "session": a.session,
         "session_key": _session_key(a),
         "turn": a.turn,
@@ -689,7 +749,8 @@ def list_actions(conn: sqlite3.Connection, since: int, until: int | None, q: dic
     """Paged actions with filters. Newest first. Facets cover the whole window, before filters."""
     records = [action_record(a) for a in load_actions(conn, since, until)]
     facets = {
-        key: sorted({r[key] for r in records if r.get(key)}) for key in ("agent", "action_type", "tool", "verdict")
+        key: sorted({r[key] for r in records if r.get(key)})
+        for key in ("agent", "action_type", "tool", "verdict", "device")
     }
     text = _query_get(q, "q").lower()
     tag = _query_get(q, "tag")
@@ -698,6 +759,7 @@ def list_actions(conn: sqlite3.Connection, since: int, until: int | None, q: dic
         "action_type": _query_get(q, "type") or _query_get(q, "action_type"),
         "tool": _query_get(q, "tool"),
         "verdict": _query_get(q, "verdict"),
+        "device": _query_get(q, "device"),
         "session_key": _query_get(q, "session"),
     }
 
@@ -720,6 +782,7 @@ def list_actions(conn: sqlite3.Connection, since: int, until: int | None, q: dic
                     row.get("tool") or "",
                     row.get("session") or "",
                     row.get("agent") or "",
+                    row.get("device") or "",
                     row.get("file_path") or "",
                     row.get("mcp_server") or "",
                     " ".join(row["destinations"]),
@@ -761,8 +824,11 @@ def search(conn: sqlite3.Connection, since: int, until: int | None, query: str, 
     groups = {k: [] for k in ("session", "action", "destination", "file", "tool", "mcp")}
     seen = {k: set() for k in groups}
     for action in reversed(load_actions(conn, since, until)):
+        if action.device and needle in action.device.lower():
+            _add_hit(groups, seen, "session", _session_key(action), action.device, action.agent)
         if action.session and needle in (action.session or "").lower():
-            _add_hit(groups, seen, "session", _session_key(action), action.session, action.agent)
+            detail = action.device or action.agent
+            _add_hit(groups, seen, "session", _session_key(action), action.session, detail)
         if action.tool and needle in action.tool.lower():
             _add_hit(groups, seen, "tool", action.tool, action.tool, action.agent)
         if action.file_path and needle in action.file_path.lower():

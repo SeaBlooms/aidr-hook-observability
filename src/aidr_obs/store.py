@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS log_lines (
     pid INTEGER NOT NULL,
     location TEXT,
     message TEXT NOT NULL,
-    source_file TEXT
+    source_file TEXT,
+    device TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS log_lines_agent_pid ON log_lines(agent, pid, ts_ms);
 CREATE INDEX IF NOT EXISTS log_lines_level ON log_lines(level, ts_ms);
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS runs (
     retries INTEGER,
     fallbacks INTEGER,
     error_count INTEGER,
-    hook_file TEXT
+    hook_file TEXT,
+    device TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS runs_start ON runs(start_ms);
 
@@ -85,7 +87,8 @@ CREATE TABLE IF NOT EXISTS captures (
     stdout_truncated INTEGER,
     stderr_bytes INTEGER,
     tap_error TEXT,
-    run_id TEXT
+    run_id TEXT,
+    device TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS captures_ts ON captures(ts_ms);
 
@@ -136,6 +139,7 @@ def connect(db_file: Path | None = None) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate_push_state(conn)
     _migrate_jev_reviews(conn)
+    _migrate_device_columns(conn)
     if new:
         try:
             os.chmod(db_file, 0o600)
@@ -174,6 +178,64 @@ def _migrate_push_state(conn: sqlite3.Connection) -> None:
                 " SELECT '', stream, file_key, offset, updated_ms FROM push_state_v1"
             )
             conn.execute("DROP TABLE push_state_v1")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, name: str, ddl: str) -> bool:
+    cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    if not cols or name in cols:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+    return True
+
+
+def device_of(path: Path, data_dir: Path | None = None) -> str:
+    """Mac name for a file under data/devices/<name>/, or '' for the legacy spool."""
+    root = (data_dir or paths.data_dir()) / "devices"
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return ""
+    return relative.parts[0] if relative.parts else ""
+
+
+def _backfill_capture_devices(conn: sqlite3.Connection, data_dir: Path | None = None) -> None:
+    """Set device on captures already ingested from a per-Mac spool."""
+    data_dir = data_dir or paths.data_dir()
+    for path in capture_files(data_dir):
+        device = device_of(path, data_dir)
+        if not device:
+            continue
+        ids = []
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    try:
+                        rec = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("id"):
+                        ids.append(rec["id"])
+        except OSError:
+            continue
+        if ids:
+            conn.executemany(
+                "UPDATE captures SET device = ? WHERE id = ? AND device = ''",
+                [(device, capture_id) for capture_id in ids],
+            )
+
+
+def _migrate_device_columns(conn: sqlite3.Connection) -> None:
+    """Remember which Mac a capture or log line came from.
+
+    Existing rows stay blank until the spool files name a Mac. That backfill runs once,
+    when the column is added, so later requests do not re-read the files.
+    """
+    added = _ensure_column(conn, "captures", "device", "device TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "log_lines", "device", "device TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "runs", "device", "device TEXT NOT NULL DEFAULT ''")
+    if added:
+        with conn:
+            _backfill_capture_devices(conn)
 
 
 def _migrate_jev_reviews(conn: sqlite3.Connection) -> None:
@@ -250,6 +312,7 @@ def ingest_logs(conn: sqlite3.Connection, log_dir: Path | None = None, data_dir:
 
 def _ingest_log_dir(conn: sqlite3.Connection, log_dir: Path) -> int:
     added = 0
+    device = device_of(log_dir)
     for path, agent in logparse.discover_log_files(log_dir):
         try:
             data = _read_new(conn, path)
@@ -260,8 +323,9 @@ def _ingest_log_dir(conn: sqlite3.Connection, log_dir: Path) -> int:
             n = seen.get(line.raw, 0)
             seen[line.raw] = n + 1
             cur = conn.execute(
-                "INSERT OR IGNORE INTO log_lines (id, agent, ts, ts_ms, level, pid, location, message, source_file)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO log_lines"
+                " (id, agent, ts, ts_ms, level, pid, location, message, source_file, device)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     _line_id(agent, line.raw, n),
                     agent,
@@ -272,6 +336,7 @@ def _ingest_log_dir(conn: sqlite3.Connection, log_dir: Path) -> int:
                     line.where,
                     line.message,
                     path.name,
+                    device or device_of(path),
                 ),
             )
             added += cur.rowcount
@@ -281,8 +346,8 @@ def _ingest_log_dir(conn: sqlite3.Connection, log_dir: Path) -> int:
 def rebuild_runs(conn: sqlite3.Connection) -> int:
     conn.execute("DELETE FROM runs")
     total = 0
-    agents = [r[0] for r in conn.execute("SELECT DISTINCT agent FROM log_lines")]
-    for agent in agents:
+    groups = conn.execute("SELECT DISTINCT agent, COALESCE(device, '') AS device FROM log_lines").fetchall()
+    for agent, device in groups:
         lines = [
             logparse.LogLine(
                 ts=r["ts"],
@@ -294,13 +359,18 @@ def rebuild_runs(conn: sqlite3.Connection) -> int:
                 raw="",
             )
             for r in conn.execute(
-                "SELECT ts, ts_ms, level, pid, location, message FROM log_lines WHERE agent = ? ORDER BY ts_ms, rowid",
-                (agent,),
+                "SELECT ts, ts_ms, level, pid, location, message FROM log_lines"
+                " WHERE agent = ? AND COALESCE(device, '') = ? ORDER BY ts_ms, rowid",
+                (agent, device),
             )
         ]
         for run in logparse.group_runs(agent, lines):
+            run.device = device
             conn.execute(
-                "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO runs (run_id, agent, pid, start_ts, start_ms, end_ms, duration_ms, event,"
+                " stdin_bytes, key_source, installed_config, mcp_artifacts, discovery_json, project_root, outcome,"
+                " http_status, url, post_bytes, sender, retries, fallbacks, error_count, hook_file, device)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run.run_id,
                     run.agent,
@@ -325,6 +395,7 @@ def rebuild_runs(conn: sqlite3.Connection) -> int:
                     run.fallbacks,
                     run.error_count,
                     run.hook_file,
+                    device,
                 ),
             )
             total += 1
@@ -388,6 +459,7 @@ def ingest_captures(conn: sqlite3.Connection, data_dir: Path | None = None) -> i
             data = _read_new(conn, path)
         except OSError:
             continue
+        device = device_of(path, data_dir)
         for raw in data.decode("utf-8", "replace").splitlines():
             try:
                 rec = json.loads(raw)
@@ -398,9 +470,9 @@ def ingest_captures(conn: sqlite3.Connection, data_dir: Path | None = None) -> i
             cur = conn.execute(
                 "INSERT OR IGNORE INTO captures (id, ts, ts_ms, agent, event, tool_name, session_id, cwd, latency_ms,"
                 " exit_code, timed_out, child_pid, hook_path, hook_version, dry_run, verdict, reason, stdin_json,"
-                " stdout_text, stdout_truncated, stderr_bytes, tap_error) VALUES"
-                " (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                _capture_row(rec),
+                " stdout_text, stdout_truncated, stderr_bytes, tap_error, device) VALUES"
+                " (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (*_capture_row(rec), device),
             )
             added += cur.rowcount
     return added
@@ -418,10 +490,12 @@ def link_captures(conn: sqlite3.Connection) -> None:
         UPDATE captures SET run_id = (
             SELECT r.run_id FROM runs r
             WHERE r.pid = captures.child_pid AND r.agent = captures.agent
+              AND COALESCE(r.device, '') = COALESCE(captures.device, '')
               AND ABS(r.start_ms - captures.ts_ms) <= ?
               AND ABS(r.start_ms - captures.ts_ms) = (
                   SELECT MIN(ABS(r2.start_ms - captures.ts_ms)) FROM runs r2
                   WHERE r2.pid = captures.child_pid AND r2.agent = captures.agent
+                    AND COALESCE(r2.device, '') = COALESCE(captures.device, '')
                     AND ABS(r2.start_ms - captures.ts_ms) <= ?
               )
             ORDER BY r.start_ms LIMIT 1

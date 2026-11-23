@@ -1,7 +1,7 @@
 import { getJSON } from "../api.js";
 import { StackedChart } from "../components/chart.js";
 import { DataTable } from "../components/table.js";
-import { EventName, LoadView, duration, html } from "../components/ui.js";
+import { EventName, LoadView, deviceColumn, deviceList, duration, html } from "../components/ui.js";
 import { compact } from "../format.js";
 import { load, save } from "../prefs.js";
 
@@ -42,6 +42,7 @@ export class Usage extends LoadView {
           empty="No token data yet"
           columns=${[
             { id: "model", label: "Model", sortValue: (row) => row.model },
+            { id: "devices", label: "Devices", sortValue: (row) => (row.devices || []).join(","), render: (row) => deviceList(row.devices) },
             { id: "responses", label: "Responses", sortValue: (row) => row.responses },
             { id: "input_tokens", label: "Input", sortValue: (row) => row.input_tokens, render: (row) => compact(row.input_tokens) },
             { id: "output_tokens", label: "Output", sortValue: (row) => row.output_tokens, render: (row) => compact(row.output_tokens) },
@@ -68,6 +69,7 @@ export class Usage extends LoadView {
         <${DataTable} tableId="projects" caption="Projects" exportName="projects" rows=${data.projects || []} rowKey=${(row) => row.project}
           columns=${[
             { id: "name", label: "Project", sortValue: (row) => row.name, render: (row) => html`<strong>${row.name}</strong><div class="muted">${row.project}</div>` },
+            { id: "devices", label: "Devices", sortValue: (row) => (row.devices || []).join(","), render: (row) => deviceList(row.devices) },
             { id: "agents", label: "Agents", sortValue: (row) => (row.agents || []).join(","), render: (row) => (row.agents || []).join(", ") },
             { id: "sessions", label: "Sessions", sortValue: (row) => row.sessions },
             { id: "prompts", label: "Prompts", sortValue: (row) => row.prompts },
@@ -78,12 +80,12 @@ export class Usage extends LoadView {
       </section>
       <div class="split">
         <section class="card"><h2>Tool run time</h2>
-          <${DataTable} tableId="tool-perf" caption="Tool run time" exportName="tool-perf" rows=${data.tool_perf || []} rowKey=${(row) => row.agent + row.tool}
+          <${DataTable} tableId="tool-perf" caption="Tool run time" exportName="tool-perf" rows=${data.tool_perf || []} rowKey=${(row) => (row.device || "") + row.agent + row.tool}
             empty="No post-tool events yet"
             columns=${perfColumns(false)} />
         </section>
         <section class="card"><h2>Hook latency</h2>
-          <${DataTable} tableId="hook-perf" caption="Hook latency" exportName="hook-perf" rows=${data.hook_perf || []} rowKey=${(row) => row.agent + row.event}
+          <${DataTable} tableId="hook-perf" caption="Hook latency" exportName="hook-perf" rows=${data.hook_perf || []} rowKey=${(row) => (row.device || "") + row.agent + row.event}
             empty="No captures yet"
             columns=${perfColumns(true)} />
         </section>
@@ -93,6 +95,7 @@ export class Usage extends LoadView {
 
 function perfColumns(hook) {
   return [
+    deviceColumn(),
     { id: "agent", label: "Agent", sortValue: (row) => row.agent },
     hook
       ? { id: "event", label: "Event", sortValue: (row) => row.event, render: (row) => html`<${EventName} name=${row.event} />` }

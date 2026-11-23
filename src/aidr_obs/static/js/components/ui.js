@@ -2,6 +2,19 @@ import { getJSON } from "../api.js";
 import { absolute, clip, duration, eventLabel, hasRedaction, iso, presentJson, relative, toolName } from "../format.js";
 import { Component, html } from "../html.js";
 
+export function deviceName(value) {
+  return value ? html`<span class="device" title=${value}>${value}</span>` : html`<span class="muted">–</span>`;
+}
+
+export function deviceList(values) {
+  const names = (values || []).filter(Boolean);
+  return names.length ? names.map((name) => html`<span class="device" key=${name}>${name}</span>`) : html`<span class="muted">–</span>`;
+}
+
+export function deviceColumn() {
+  return { id: "device", label: "Device", sortValue: (row) => row.device || "", render: (row) => deviceName(row.device) };
+}
+
 export function When({ ts }) {
   if (!ts) return html`<span class="muted">–</span>`;
   return html`<time datetime=${iso(ts)} title=${absolute(ts)}>${relative(ts)}</time>`;

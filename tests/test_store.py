@@ -93,6 +93,34 @@ def test_captures_ingest_and_link_to_run(fixture_log, env):
     assert store.ingest(conn)["captures_added"] == 0
 
 
+def test_per_mac_spool_records_the_device(env):
+    mac = env["home"] / "devices" / "other-mac"
+    mac.mkdir(parents=True)
+    rec = {
+        "id": "from-other",
+        "ts": "2026-06-29T14:23:01.050",
+        "ts_ms": 1,
+        "agent": "cursor",
+        "event": "beforeSubmitPrompt",
+        "session_id": "s1",
+    }
+    (mac / "capture.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    conn = store.connect()
+    assert store.ingest_captures(conn) == 1
+    assert conn.execute("SELECT device FROM captures").fetchone()[0] == "other-mac"
+
+
+def test_backfill_names_captures_already_stored(env):
+    env["home"].mkdir()
+    mac = env["home"] / "devices" / "mac-b"
+    mac.mkdir(parents=True)
+    (mac / "capture.jsonl").write_text(json.dumps({"id": "old"}) + "\n", encoding="utf-8")
+    conn = store.connect()
+    conn.execute("INSERT INTO captures (id, ts, ts_ms) VALUES ('old', '', 1)")
+    store._backfill_capture_devices(conn)
+    assert conn.execute("SELECT device FROM captures WHERE id = 'old'").fetchone()[0] == "mac-b"
+
+
 def test_prune_drops_old_captures_only_from_our_files(fixture_log, env):
     conn = store.connect()
     now = int(time.time() * 1000)
