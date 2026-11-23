@@ -25,8 +25,8 @@ export class SessionPage extends LoadView {
     const mode = this.props.app.mode;
     return html`<header class="session-head">
         <div>
-          <h2>${this.props.app.sessionKey}</h2>
-          <p class="muted">${current ? current.agent : ""} ${current && current.projects ? current.projects.join(", ") : ""} ${current && current.models ? current.models.join(", ") : ""}</p>
+          <h2>${(current && current.device) || (current && (current.session || "").slice(0, 8)) || "Session"}</h2>
+          <p class="muted">${current ? current.agent : ""} ${(current && current.session || "").slice(0, 8)} ${current && current.projects ? current.projects.join(", ") : ""} ${current && current.models ? current.models.join(", ") : ""}</p>
         </div>
         <div class="row-actions">
           <button class="btn" type="button" disabled=${index <= 0} onClick=${() => go("session", { sessionKey: items[index - 1].key })}>Previous</button>

@@ -181,7 +181,7 @@ def test_sensitive(conn):
     s = insights.sensitive(conn, 0)
     assert [(h["tool"], h["access"], h["labels"]) for h in s["hits"]] == [("Write", "edit", ["env file"])]
     assert s["unsandboxed_count"] == 1 and "status.example.com" in s["unsandboxed"][0]["summary"]
-    assert {"agent": "claude-code", "mode": "bypassPermissions", "events": 1} in s["permission_modes"]
+    assert {"agent": "claude-code", "device": "", "mode": "bypassPermissions", "events": 1} in s["permission_modes"]
 
 
 def test_sensitive_patterns():
@@ -193,6 +193,16 @@ def test_sensitive_patterns():
         )
         == []
     )
+
+
+def test_sessions_stay_separate_per_device(conn):
+    add(conn, 1, "cursor", "beforeSubmitPrompt", {"conversation_id": "same", "prompt": "hi"})
+    add(conn, 2, "cursor", "beforeSubmitPrompt", {"conversation_id": "same", "prompt": "there"})
+    conn.execute("UPDATE captures SET device = 'mac-a' WHERE id = 'c1'")
+    conn.execute("UPDATE captures SET device = 'mac-b' WHERE id = 'c2'")
+    items = insights.sessions(conn, 0)["items"]
+    assert {row["key"] for row in items} == {"cursor|same|mac-a", "cursor|same|mac-b"}
+    assert {row["device"] for row in items} == {"mac-a", "mac-b"}
 
 
 def test_sessions_and_timeline(conn):
@@ -223,6 +233,7 @@ def test_usage(conn):
     assert u["tokens_by_model"] == [
         {
             "model": "fake-model",
+            "devices": [],
             "responses": 1,
             "input_tokens": 1000.0,
             "output_tokens": 200.0,

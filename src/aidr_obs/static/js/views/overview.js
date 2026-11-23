@@ -1,6 +1,6 @@
 import { getJSON } from "../api.js";
 import { StackedChart } from "../components/chart.js";
-import { DryRunBanner, LoadView, Summary, When, html } from "../components/ui.js";
+import { DryRunBanner, LoadView, Summary, When, deviceName, html } from "../components/ui.js";
 import { shortId } from "../format.js";
 import { go, update } from "../state.js";
 
@@ -33,6 +33,7 @@ export class Overview extends LoadView {
               ${data.feed.map(
                 (row) => html`<li key=${row.id}><button type="button" class="feed-row" onClick=${() => update({ open: "capture:" + row.id }, "push")}>
                   <span>${row.agent}</span>
+                  <span>${deviceName(row.device)}</span>
                   <span>${row.action_type}</span>
                   <${Summary} text=${row.summary} limit=${72} />
                   <span class="muted">${shortId(row.session)}</span>

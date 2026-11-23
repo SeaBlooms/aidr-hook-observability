@@ -1,5 +1,5 @@
 import { getJSON } from "../api.js";
-import { LoadView, Verdict, When, html } from "../components/ui.js";
+import { LoadView, Verdict, When, deviceName, html } from "../components/ui.js";
 import { Component } from "../html.js";
 import { go, update } from "../state.js";
 
@@ -322,6 +322,7 @@ export class GraphCanvas extends Component {
     const examples = data.examples || [];
     return html`<h2>${(NODE_TYPES[data.type] || {}).label || data.type}</h2>
       <div class="node-title">${data.label}</div>
+      ${data.device ? html`<p>${deviceName(data.device)}</p>` : null}
       <p>${data.count} actions <${Verdict} verdict=${data.worst} mode=${this.props.app.mode} /></p>
       <div class="row-actions">
         ${data.id !== this.focus() ? html`<button class="btn" type="button" onClick=${() => go("graph", { focus: data.id })}>Focus</button>` : null}
@@ -334,7 +335,7 @@ export class GraphCanvas extends Component {
       ${examples.length
         ? examples.map(
             (item) => html`<button class="tool" type="button" key=${item.capture_id} onClick=${() => update({ open: "capture:" + item.capture_id }, "push")}>
-              <${Verdict} verdict=${item.verdict} mode=${this.props.app.mode} /> ${item.tool || "?"}
+              <${Verdict} verdict=${item.verdict} mode=${this.props.app.mode} /> ${deviceName(item.device)} ${item.tool || "?"}
               <span class="muted"><${When} ts=${item.ts} /></span>
               <div><code>${item.summary}</code></div>
             </button>`,

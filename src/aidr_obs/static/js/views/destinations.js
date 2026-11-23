@@ -1,5 +1,5 @@
 import { getJSON } from "../api.js";
-import { Bars, LoadView, Summary, Verdict, When, html, verdictTags } from "../components/ui.js";
+import { Bars, LoadView, Summary, Verdict, When, deviceList, deviceName, html, verdictTags } from "../components/ui.js";
 import { go, update } from "../state.js";
 
 export class Destinations extends LoadView {
@@ -15,7 +15,7 @@ export class Destinations extends LoadView {
         ${(data.items || []).length
           ? html`<div class="table-wrap"><table>
               <caption class="sr-only">Destinations, most severe verdict first</caption>
-              <thead><tr><th>Target</th><th>Kind</th><th>Class</th><th>Actions</th><th>Verdicts</th><th>Agents</th><th>Last</th></tr></thead>
+              <thead><tr><th>Target</th><th>Kind</th><th>Class</th><th>Actions</th><th>Verdicts</th><th>Devices</th><th>Agents</th><th>Last</th></tr></thead>
               <tbody>
                 ${(data.items || []).map((row) => html`<tr key=${row.kind + row.target}>
                   <td><button class="btn link" type="button" onClick=${() => go("graph", { focus: (row.kind === "mcp" ? "mcp:" : "dest:") + row.target })}>${row.target}</button></td>
@@ -23,13 +23,15 @@ export class Destinations extends LoadView {
                   <td><span class=${"c-" + row.class}>${row.class}</span></td>
                   <td>${row.count}</td>
                   <td>${verdictTags(row.verdicts, mode)}</td>
+                  <td>${deviceList(row.devices)}</td>
                   <td>${(row.agents || []).join(", ")}</td>
                   <td><${When} ts=${row.last} /></td>
                 </tr>
-                <tr key=${row.kind + row.target + "-ex"}><td colspan="7">
+                <tr key=${row.kind + row.target + "-ex"}><td colspan="8">
                   ${(row.examples || []).map(
                     (example) => html`<button class="tool" type="button" key=${example.capture_id} onClick=${() => update({ open: "capture:" + example.capture_id }, "push")}>
                       <${Verdict} verdict=${example.verdict} mode=${mode} />
+                      ${deviceName(example.device)}
                       <span class="muted"><${When} ts=${example.ts} /> ${example.tool || ""}</span>
                       <${Summary} text=${example.summary} limit=${160} />
                     </button>`,

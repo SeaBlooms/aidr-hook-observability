@@ -62,6 +62,7 @@ export function parseHash(hash) {
     from: params.get("from") || "",
     to: params.get("to") || "",
     agent: params.get("agent") || "",
+    device: params.get("device") || "",
     q: params.get("q") || "",
     tool: params.get("tool") || "",
     verdict: params.get("verdict") || "",
@@ -83,7 +84,7 @@ function buildHash(current) {
     if (current.from) params.set("from", current.from);
     if (current.to) params.set("to", current.to);
   }
-  const keep = ["agent", "q", "tool", "verdict", "tag", "type", "focus", "open", "bucket"];
+  const keep = ["agent", "device", "q", "tool", "verdict", "tag", "type", "focus", "open", "bucket"];
   keep.forEach((key) => {
     if (current[key]) params.set(key, current[key]);
   });
@@ -100,6 +101,7 @@ function materialize(partial) {
     from: partial.from || "",
     to: partial.to || "",
     agent: partial.agent || "",
+    device: partial.device || "",
     q: partial.q || "",
     tool: partial.tool || "",
     verdict: partial.verdict || "",

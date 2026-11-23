@@ -59,6 +59,7 @@ class _Builder:
                     "verdict": a.verdict,
                     "summary": _summary(a)[:300],
                     "capture_id": a.capture_ids[0] if a.capture_ids else None,
+                    "device": a.device,
                 }
             )
         key = _session_key(a)
@@ -99,9 +100,12 @@ def _plan(a: Action) -> tuple[list[tuple], list[tuple]]:
     """The nodes (id, type, label, attrs) and edges (source, target, rel) one action touches."""
     key = _session_key(a)
     agent, session = "agent:" + a.agent, "session:" + key
+    label = _short(a.session)
+    if a.device:
+        label = a.device + " · " + label
     nodes = [
         (agent, "agent", a.agent, {}),
-        (session, "session", _short(a.session), {"agent": a.agent, "key": key}),
+        (session, "session", label, {"agent": a.agent, "key": key, "device": a.device}),
     ]
     edges = []
     if a.project:

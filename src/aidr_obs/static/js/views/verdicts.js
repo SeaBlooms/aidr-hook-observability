@@ -1,7 +1,7 @@
 import { getJSON } from "../api.js";
 import { StackedChart } from "../components/chart.js";
 import { DataTable } from "../components/table.js";
-import { DryRunBanner, EventName, LoadView, ToolLabel, Verdict, When, html } from "../components/ui.js";
+import { DryRunBanner, EventName, LoadView, ToolLabel, Verdict, When, deviceColumn, html } from "../components/ui.js";
 import { clip } from "../format.js";
 import { update } from "../state.js";
 
@@ -34,6 +34,7 @@ export class Verdicts extends LoadView {
           empty="No block, ask, mask or context verdicts in this range"
           columns=${[
             { id: "ts", label: "When", sortValue: (row) => row.ts_ms, render: (row) => html`<${When} ts=${row.ts} />` },
+            deviceColumn(),
             { id: "verdict", label: "Verdict", sortValue: (row) => row.verdict, render: (row) => html`<${Verdict} verdict=${row.verdict} mode=${mode} />` },
             {
               id: "jev",

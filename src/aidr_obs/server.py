@@ -200,6 +200,7 @@ def verdicts(conn: sqlite3.Connection, q: dict) -> dict:
     items = _rows(
         conn.execute(
             "SELECT c.id, c.ts, c.ts_ms, c.event, c.tool_name, c.verdict, c.reason, c.session_id, c.run_id,"
+            " COALESCE(c.device, '') AS device,"
             " (SELECT j.stance FROM jev_reviews j WHERE j.capture_id = c.id"
             "  ORDER BY j.asked_at DESC LIMIT 1) AS jev_stance,"
             " (SELECT group_concat(j.backend || ':' || j.stance, ',') FROM jev_reviews j"
@@ -273,12 +274,14 @@ def events(conn: sqlite3.Connection, q: dict) -> dict:
     cap_sql, cap_args = _span("c.ts_ms", since, until)
     rows = _rows(
         conn.execute(
-            "SELECT r.run_id, c.id AS capture_id, r.agent, r.start_ms AS ts_ms, r.start_ts AS ts, r.event,"
+            "SELECT r.run_id, c.id AS capture_id, r.agent,"
+            " COALESCE(NULLIF(c.device, ''), r.device, '') AS device,"
+            " r.start_ms AS ts_ms, r.start_ts AS ts, r.event,"
             " c.tool_name, r.outcome, c.verdict, c.reason, COALESCE(c.latency_ms, r.duration_ms) AS latency_ms,"
             " r.error_count, r.pid, r.post_bytes"
             " FROM runs r LEFT JOIN captures c ON c.run_id = r.run_id"
             " WHERE " + run_sql + " UNION ALL "
-            "SELECT NULL, c.id, c.agent, c.ts_ms, c.ts, c.event, c.tool_name,"
+            "SELECT NULL, c.id, c.agent, COALESCE(c.device, ''), c.ts_ms, c.ts, c.event, c.tool_name,"
             " CASE WHEN c.dry_run THEN 'dry_run' ELSE NULL END, c.verdict, c.reason, c.latency_ms,"
             " NULL, c.child_pid, NULL"
             " FROM captures c WHERE c.run_id IS NULL AND " + cap_sql + " ORDER BY ts_ms DESC",
@@ -287,7 +290,7 @@ def events(conn: sqlite3.Connection, q: dict) -> dict:
     )
 
     def keep(r):
-        for key in ("agent", "event", "tool_name", "verdict", "outcome"):
+        for key in ("agent", "device", "event", "tool_name", "verdict", "outcome"):
             want = get(key)
             if want and (r.get(key) or "") != want:
                 return False
@@ -298,7 +301,8 @@ def events(conn: sqlite3.Connection, q: dict) -> dict:
 
     filtered = [r for r in rows if keep(r)]
     facets = {
-        k: sorted({r[k] for r in rows if r.get(k)}) for k in ("agent", "event", "tool_name", "verdict", "outcome")
+        k: sorted({r[k] for r in rows if r.get(k)})
+        for k in ("agent", "device", "event", "tool_name", "verdict", "outcome")
     }
     return {"total": len(filtered), "items": filtered[offset : offset + limit], "facets": facets}
 
@@ -416,9 +420,8 @@ def errors(conn: sqlite3.Connection, q: dict) -> dict:
     err_sql, err_args = _span("ts_ms", since, until)
     groups: dict[tuple, dict] = {}
     for r in conn.execute(
-        "SELECT agent, ts, ts_ms, location, message FROM log_lines WHERE level = 'ERROR' AND "
-        + err_sql
-        + " ORDER BY ts_ms",
+        "SELECT agent, COALESCE(device, '') AS device, ts, ts_ms, location, message FROM log_lines"
+        " WHERE level = 'ERROR' AND " + err_sql + " ORDER BY ts_ms",
         err_args,
     ):
         sig = logparse.error_signature(r["message"])
@@ -431,6 +434,7 @@ def errors(conn: sqlite3.Connection, q: dict) -> dict:
                 "count": 0,
                 "first": r["ts"],
                 "agents": set(),
+                "devices": set(),
                 "locations": set(),
                 "noise": rule is not None,
                 "explanation": rule["explanation"] if rule else None,
@@ -440,16 +444,21 @@ def errors(conn: sqlite3.Connection, q: dict) -> dict:
         g["last"] = r["ts"]
         g["example"] = r["message"]
         g["agents"].add(r["agent"])
+        if r["device"]:
+            g["devices"].add(r["device"])
         g["locations"].add(r["location"])
     error_groups = sorted(
-        ({**g, "agents": sorted(g["agents"]), "locations": sorted(g["locations"])} for g in groups.values()),
+        (
+            {**g, "agents": sorted(g["agents"]), "devices": sorted(g["devices"]), "locations": sorted(g["locations"])}
+            for g in groups.values()
+        ),
         key=lambda g: (g["noise"], -g["count"]),
     )
     cap_sql, cap_args = _span("ts_ms", since, until)
     tap_errors = _rows(
         conn.execute(
-            "SELECT tap_error, COUNT(*) AS n, MAX(ts) AS last FROM captures"
-            " WHERE tap_error IS NOT NULL AND " + cap_sql + " GROUP BY tap_error ORDER BY n DESC",
+            "SELECT COALESCE(device, '') AS device, tap_error, COUNT(*) AS n, MAX(ts) AS last FROM captures"
+            " WHERE tap_error IS NOT NULL AND " + cap_sql + " GROUP BY device, tap_error ORDER BY n DESC",
             cap_args,
         )
     )
@@ -475,8 +484,9 @@ def errors(conn: sqlite3.Connection, q: dict) -> dict:
     ).fetchone()
     versions = _rows(
         conn.execute(
-            "SELECT agent, COALESCE(hook_version, '') AS hook_version, COUNT(*) AS n, MAX(ts) AS last"
-            " FROM captures WHERE " + cap_sql + " GROUP BY agent, hook_version ORDER BY n DESC",
+            "SELECT COALESCE(device, '') AS device, agent, COALESCE(hook_version, '') AS hook_version,"
+            " COUNT(*) AS n, MAX(ts) AS last"
+            " FROM captures WHERE " + cap_sql + " GROUP BY device, agent, hook_version ORDER BY n DESC",
             cap_args,
         )
     )
@@ -501,7 +511,8 @@ def mcp(conn: sqlite3.Connection, q: dict) -> dict:
     changes = []
     prev_has: dict[str, bool] = {}
     for r in conn.execute(
-        "SELECT run_id, agent, start_ts, project_root, mcp_artifacts, discovery_json FROM runs"
+        "SELECT run_id, agent, COALESCE(device, '') AS device, start_ts, project_root, mcp_artifacts, discovery_json"
+        " FROM runs"
         " WHERE mcp_artifacts IS NOT NULL AND " + run_sql + " ORDER BY start_ms",
         run_args,
     ):
@@ -510,6 +521,7 @@ def mcp(conn: sqlite3.Connection, q: dict) -> dict:
             {
                 "run_id": r["run_id"],
                 "agent": r["agent"],
+                "device": r["device"],
                 "ts": r["start_ts"],
                 "project_root": r["project_root"],
                 "artifacts": r["mcp_artifacts"],
@@ -518,12 +530,13 @@ def mcp(conn: sqlite3.Connection, q: dict) -> dict:
             }
         )
         for d in disc:
-            key = d["scope"] + "|" + d["kind"] + "|" + d["path"]
+            key = r["device"] + "|" + d["scope"] + "|" + d["kind"] + "|" + d["path"]
             current = bool(d["has_servers"])
             if key in prev_has and prev_has[key] != current:
                 changes.append(
                     {
                         "ts": r["start_ts"],
+                        "device": r["device"],
                         "run_id": r["run_id"],
                         "scope": d["scope"],
                         "kind": d["kind"],
@@ -538,13 +551,21 @@ def mcp(conn: sqlite3.Connection, q: dict) -> dict:
             latest[key] = {
                 **d,
                 "agent": r["agent"],
+                "device": r["device"],
                 "last_seen": r["start_ts"],
                 "first_seen": prev["first_seen"] if prev else r["start_ts"],
                 "changes": (prev["changes"] if prev else 0) + (1 if changed else 0),
             }
     collapsed = []
     for snap in snapshots:
-        sig = (snap["agent"], snap["project_root"], snap["artifacts"], snap["sources"], snap["with_servers"])
+        sig = (
+            snap["agent"],
+            snap["device"],
+            snap["project_root"],
+            snap["artifacts"],
+            snap["sources"],
+            snap["with_servers"],
+        )
         if collapsed and collapsed[-1]["sig"] == sig:
             collapsed[-1]["repeats"] += 1
             collapsed[-1]["until"] = snap["ts"]
@@ -558,13 +579,24 @@ def mcp(conn: sqlite3.Connection, q: dict) -> dict:
             continue
         group = called.setdefault(
             action.mcp_server,
-            {"server": action.mcp_server, "count": 0, "agents": set(), "verdicts": {}, "last": action.ts},
+            {
+                "server": action.mcp_server,
+                "count": 0,
+                "agents": set(),
+                "devices": set(),
+                "verdicts": {},
+                "last": action.ts,
+            },
         )
         group["count"] += 1
         group["agents"].add(action.agent)
+        if action.device:
+            group["devices"].add(action.device)
         group["verdicts"][action.verdict] = group["verdicts"].get(action.verdict, 0) + 1
         group["last"] = action.ts
-    called_rows = [{**group, "agents": sorted(group["agents"])} for group in called.values()]
+    called_rows = [
+        {**group, "agents": sorted(group["agents"]), "devices": sorted(group["devices"])} for group in called.values()
+    ]
     called_rows.sort(key=lambda group: -group["count"])
     return {
         "snapshots": list(reversed(snapshots))[:500],
@@ -740,8 +772,9 @@ def setup_status(conn: sqlite3.Connection, q: dict) -> dict:
     )
     versions = _rows(
         conn.execute(
-            "SELECT agent, COALESCE(hook_version, '') AS hook_version, COUNT(*) AS n, MAX(ts) AS last"
-            " FROM captures GROUP BY agent, hook_version ORDER BY n DESC"
+            "SELECT COALESCE(device, '') AS device, agent, COALESCE(hook_version, '') AS hook_version,"
+            " COUNT(*) AS n, MAX(ts) AS last"
+            " FROM captures GROUP BY device, agent, hook_version ORDER BY n DESC"
         )
     )
     return {"checks": checks, "versions": versions, "show": any(not item["ok"] for item in checks)}

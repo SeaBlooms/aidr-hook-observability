@@ -1,5 +1,5 @@
 import { getJSON, saveNoise } from "../api.js";
-import { Bars, LoadView, When, duration, html } from "../components/ui.js";
+import { Bars, LoadView, When, deviceList, deviceName, duration, html } from "../components/ui.js";
 import { load, save } from "../prefs.js";
 import { update } from "../state.js";
 
@@ -49,8 +49,8 @@ export class Health extends LoadView {
         ${this.editor(data.noise)}
       </section>
       ${(errors.tap_errors || []).length
-        ? html`<section class="card"><h2>Tap errors</h2><table><thead><tr><th>Count</th><th>Error</th><th>Last</th></tr></thead>
-            <tbody>${errors.tap_errors.map((row) => html`<tr key=${row.tap_error}><td>${row.n}</td><td>${row.tap_error}</td><td><${When} ts=${row.last} /></td></tr>`)}</tbody></table></section>`
+        ? html`<section class="card"><h2>Tap errors</h2><table><thead><tr><th>Device</th><th>Count</th><th>Error</th><th>Last</th></tr></thead>
+            <tbody>${errors.tap_errors.map((row) => html`<tr key=${(row.device || "") + row.tap_error}><td>${deviceName(row.device)}</td><td>${row.n}</td><td>${row.tap_error}</td><td><${When} ts=${row.last} /></td></tr>`)}</tbody></table></section>`
         : null}
       <div class="split">
         ${healthCard("API key source", errors.health.key_source)}
@@ -61,8 +61,8 @@ export class Health extends LoadView {
       </div>
       <section class="card"><h2>Hook version</h2>
         ${(errors.versions || []).length
-          ? html`<table><thead><tr><th>Agent</th><th>Version</th><th>Captures</th><th>Last</th></tr></thead>
-              <tbody>${errors.versions.map((row) => html`<tr key=${row.agent + row.hook_version}><td>${row.agent}</td><td>${row.hook_version || "not recorded"}</td><td>${row.n}</td><td><${When} ts=${row.last} /></td></tr>`)}</tbody></table>`
+          ? html`<table><thead><tr><th>Device</th><th>Agent</th><th>Version</th><th>Captures</th><th>Last</th></tr></thead>
+              <tbody>${errors.versions.map((row) => html`<tr key=${(row.device || "") + row.agent + row.hook_version}><td>${deviceName(row.device)}</td><td>${row.agent}</td><td>${row.hook_version || "not recorded"}</td><td>${row.n}</td><td><${When} ts=${row.last} /></td></tr>`)}</tbody></table>`
           : html`<p class="empty">No captures yet</p>`}
       </section>`;
   }
@@ -125,7 +125,7 @@ function errorTable(groups, quiet) {
       (group) => html`<tr key=${group.signature + (group.explanation || "")} class=${quiet ? "noise" : ""}>
         <td>${group.count}</td>
         <td><code>${group.signature}</code>
-          <div class="muted">${(group.locations || []).join(", ")} · ${(group.agents || []).join(", ")}
+          <div class="muted">${deviceList(group.devices)} · ${(group.locations || []).join(", ")} · ${(group.agents || []).join(", ")}
             ${group.explanation ? " · " + group.explanation : ""}</div></td>
         <td><${When} ts=${group.first} /></td>
         <td><${When} ts=${group.last} /></td>

@@ -2,7 +2,7 @@ import { askJev, getJSON } from "../api.js";
 import { duration, toolName } from "../format.js";
 import { Component, html } from "../html.js";
 import { go, update } from "../state.js";
-import { EventName, JsonBlock, KV, ToolLabel, Verdict, When } from "./ui.js";
+import { EventName, JsonBlock, KV, ToolLabel, Verdict, When, deviceName } from "./ui.js";
 
 function parseOpen(value) {
   if (!value) return null;
@@ -127,7 +127,9 @@ export class Drawer extends Component {
     const capture = data.capture;
     const run = data.run;
     const title = (capture && capture.event) || (run && run.event) || "Event";
-    const sessionKey = capture && capture.session_id ? (capture.agent || "?") + "|" + capture.session_id : "";
+    const sessionKey = capture && capture.session_id
+      ? (capture.agent || "?") + "|" + capture.session_id + (capture.device ? "|" + capture.device : "")
+      : "";
     const tool = toolName(capture && capture.tool_name);
     const graphId = tool.name ? "tool:" + tool.name : "";
     return html`<div class="drawer-head">
@@ -149,6 +151,7 @@ export class Drawer extends Component {
             ${this.jevBox(data)}
             <${KV} rows=${[
               ["When", html`<${When} ts=${capture.ts} />`],
+              ["Device", deviceName(capture.device)],
               ["Tool", html`<${ToolLabel} name=${capture.tool_name} />`],
               ["Session", capture.session_id],
               ["Directory", capture.cwd],
@@ -175,6 +178,7 @@ export class Drawer extends Component {
             <summary>Debug log</summary>
             <${KV} rows=${[
               ["Run", run.run_id],
+              ["Device", deviceName(run.device)],
               ["Agent", run.agent],
               ["Outcome", run.outcome],
               ["HTTP", run.http_status],

@@ -1,6 +1,6 @@
 import { getJSON } from "../api.js";
 import { DataTable } from "../components/table.js";
-import { LoadView, When, duration, html, verdictTags } from "../components/ui.js";
+import { LoadView, When, deviceColumn, duration, html, verdictTags } from "../components/ui.js";
 import { go } from "../state.js";
 
 export class Sessions extends LoadView {
@@ -21,6 +21,7 @@ export class Sessions extends LoadView {
       columns=${[
         { id: "last", label: "Last", sortValue: (row) => row.last_ms, render: (row) => html`<${When} ts=${row.last} />` },
         { id: "agent", label: "Agent", sortValue: (row) => row.agent },
+        deviceColumn(),
         { id: "session", label: "Session", sortValue: (row) => row.session || "", render: (row) => (row.session || "?").slice(0, 8) },
         { id: "project", label: "Project", sortValue: (row) => (row.projects || []).join(","), render: (row) => (row.projects || []).map((path) => path.split("/").pop()).join(", ") || "–" },
         { id: "model", label: "Model", sortValue: (row) => (row.models || []).join(","), render: (row) => (row.models || []).join(", ") || "–" },

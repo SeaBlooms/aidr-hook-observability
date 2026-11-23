@@ -63,10 +63,12 @@ class Run:
     fallbacks: int = 0
     error_count: int = 0
     hook_file: str | None = None
+    device: str = ""
 
     @property
     def run_id(self) -> str:
-        return self.agent + ":" + str(self.pid) + ":" + str(self.start_ms)
+        base = self.agent + ":" + str(self.pid) + ":" + str(self.start_ms)
+        return base + ":" + self.device if self.device else base
 
     @property
     def duration_ms(self) -> int:

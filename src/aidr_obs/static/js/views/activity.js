@@ -1,6 +1,6 @@
 import { getJSON } from "../api.js";
 import { DataTable } from "../components/table.js";
-import { DryRunBanner, EventName, LoadView, Summary, ToolLabel, Verdict, When, duration, html } from "../components/ui.js";
+import { DryRunBanner, EventName, LoadView, Summary, ToolLabel, Verdict, When, deviceColumn, duration, html } from "../components/ui.js";
 import { update } from "../state.js";
 
 export class Activity extends LoadView {
@@ -15,6 +15,7 @@ export class Activity extends LoadView {
       super.shouldReload(previous, next) ||
       previous.q !== next.q ||
       previous.agent !== next.agent ||
+      previous.device !== next.device ||
       previous.tool !== next.tool ||
       previous.verdict !== next.verdict ||
       previous.tag !== next.tag ||
@@ -50,6 +51,7 @@ export class Activity extends LoadView {
     return html`<${DryRunBanner} mode=${app.mode} />
       <div class="filters">
         ${select("agent", "Agent", app.agent, facets.agent)}
+        ${select("device", "Device", app.device, facets.device)}
         ${app.raw ? null : select("type", "Action", app.type, facets.action_type)}
         ${select("tool", "Tool", app.tool, facets.tool || facets.tool_name)}
         ${select("verdict", "Verdict", app.verdict, facets.verdict)}
@@ -92,6 +94,7 @@ export class Activity extends LoadView {
       columns=${[
         { id: "ts", label: "When", sortValue: (row) => row.ts_ms, render: (row) => html`<${When} ts=${row.ts} />` },
         { id: "agent", label: "Agent", sortValue: (row) => row.agent, render: (row) => row.agent },
+        deviceColumn(),
         { id: "session", label: "Session", sortValue: (row) => row.session || "", render: (row) => html`<button class="btn mini" type="button" onClick=${(event) => { event.stopPropagation(); update({ view: "session", sessionKey: row.session_key, open: "" }, "push"); }}>${(row.session || "–").slice(0, 8)}</button>` },
         { id: "tool", label: "Tool", sortValue: (row) => row.tool || row.action_type, render: (row) => html`<${ToolLabel} name=${row.tool || row.action_type} mcp=${row.action_type === "MCP call"} />` },
         { id: "summary", label: "Summary", truncate: true, sortValue: (row) => row.summary || "", exportValue: (row) => row.summary || "", render: (row) => html`<${Summary} text=${row.summary} />` },
@@ -112,6 +115,7 @@ export class Activity extends LoadView {
       columns=${[
         { id: "ts", label: "When", sortValue: (row) => row.ts_ms, render: (row) => html`<${When} ts=${row.ts} />` },
         { id: "agent", label: "Agent", sortValue: (row) => row.agent },
+        deviceColumn(),
         { id: "event", label: "Event", sortValue: (row) => row.event, render: (row) => html`<${EventName} name=${row.event} />` },
         { id: "tool", label: "Tool", sortValue: (row) => row.tool_name || "", render: (row) => html`<${ToolLabel} name=${row.tool_name} />` },
         { id: "outcome", label: "Outcome", sortValue: (row) => row.outcome || "", render: (row) => row.outcome || "–" },
@@ -125,6 +129,7 @@ export class Activity extends LoadView {
 function filters(app) {
   return {
     agent: app.agent,
+    device: app.device,
     q: app.q,
     tool: app.tool,
     verdict: app.verdict,
@@ -144,6 +149,7 @@ function select(key, label, value, options) {
 function chips(app) {
   const items = [
     ["agent", app.agent],
+    ["device", app.device],
     ["type", app.type],
     ["tool", app.tool],
     ["verdict", app.verdict],
